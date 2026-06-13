@@ -7,9 +7,27 @@ local .env file (see .env.example).
 """
 
 import os
+
+import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _get_setting(key, default=""):
+    """Read a setting from the environment (.env locally) first, falling
+    back to Streamlit secrets (.streamlit/secrets.toml, or the Cloud
+    Secrets box) - Streamlit Community Cloud doesn't reliably expose
+    root-level secrets as environment variables, but st.secrets always
+    has them."""
+    val = os.getenv(key)
+    if val is not None:
+        return val
+    try:
+        return str(st.secrets[key])
+    except Exception:
+        return default
+
 
 # ---------------------------------------------------------------------------
 # LLM API settings - any OpenAI-compatible chat completions endpoint works
@@ -17,11 +35,11 @@ load_dotenv()
 # standard {"model", "messages", "temperature"} request shape and reads
 # choices[0].message.content from the response.
 # ---------------------------------------------------------------------------
-LLM_API_KEY = os.getenv("LLM_API_KEY", "")
-LLM_API_URL = os.getenv("LLM_API_URL", "https://api.groq.com/openai/v1/chat/completions")
+LLM_API_KEY = _get_setting("LLM_API_KEY", "")
+LLM_API_URL = _get_setting("LLM_API_URL", "https://api.groq.com/openai/v1/chat/completions")
 # Default model runs on Groq's free tier - see
 # https://console.groq.com/docs/models for the current list of model ids.
-LLM_MODEL = os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+LLM_MODEL = _get_setting("LLM_MODEL", "llama-3.3-70b-versatile")
 LLM_TIMEOUT_SECONDS = 60
 
 # ---------------------------------------------------------------------------
@@ -148,13 +166,13 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trading_agen
 # first-come-first-served basis (db_handler.authorized_users tracks who has
 # already logged in). Admins (below) are exempt from this cap and can free up
 # slots via the in-app Admin tab.
-AUTH_MAX_USERS = int(os.getenv("AUTH_MAX_USERS", "10"))
+AUTH_MAX_USERS = int(_get_setting("AUTH_MAX_USERS", "10"))
 
 # Comma-separated Google account emails (case-insensitive) that always have
 # access regardless of AUTH_MAX_USERS, and see the Admin tab to manage the
 # authorized-user list.
 AUTH_ADMIN_EMAILS = {
-    e.strip().lower() for e in os.getenv("AUTH_ADMIN_EMAILS", "").split(",") if e.strip()
+    e.strip().lower() for e in _get_setting("AUTH_ADMIN_EMAILS", "").split(",") if e.strip()
 }
 
 # ---------------------------------------------------------------------------

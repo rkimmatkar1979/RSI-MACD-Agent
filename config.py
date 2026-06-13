@@ -132,7 +132,7 @@ SCORE_MACD_PROXIMITY = 28
 SCORE_VOLUME = 15
 SCORE_SECTOR_TREND = 7
 
-SHORTLIST_MAX_SIZE = 5
+SHORTLIST_MAX_SIZE = 8
 SHORTLIST_MIN_SCORE = 20  # ignore stocks with a weak/no setup
 
 # ---------------------------------------------------------------------------
@@ -168,6 +168,11 @@ TURSO_AUTH_TOKEN = _get_setting("TURSO_AUTH_TOKEN", "")
 # requires Authlib and a [auth] / [auth.google] section in
 # .streamlit/secrets.toml, see .streamlit/secrets.toml.example)
 # ---------------------------------------------------------------------------
+# Master switch for Google sign-in. When False, the app skips the login
+# screen and per-user limits entirely (everyone gets full access, no Admin
+# tab) - useful while Google OAuth isn't set up or for a private deployment.
+AUTH_ENABLED = _get_setting("AUTH_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+
 # Maximum number of distinct Google accounts that may use this app, on a
 # first-come-first-served basis (db_handler.authorized_users tracks who has
 # already logged in). Admins (below) are exempt from this cap and can free up

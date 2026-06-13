@@ -51,45 +51,49 @@ st.title("📈 Nifty 100 Swing Trading Agent")
 # ---------------------------------------------------------------------------
 # Authentication - Google sign-in via Streamlit's built-in auth (requires
 # Authlib + a [auth]/[auth.google] section in .streamlit/secrets.toml, see
-# .streamlit/secrets.toml.example).
+# .streamlit/secrets.toml.example). Toggle with config.AUTH_ENABLED.
 # ---------------------------------------------------------------------------
-if not getattr(st.user, "is_logged_in", False):
-    st.write("Please sign in with your Google account to continue.")
-    if st.button("🔐 Log in with Google", type="primary"):
-        try:
-            st.login("google")
-        except Exception as e:
-            st.error(
-                "Google sign-in isn't configured yet. Copy "
-                ".streamlit/secrets.toml.example to .streamlit/secrets.toml "
-                f"and fill in your Google OAuth credentials. ({e})"
-            )
-    st.stop()
-
-user_email = (st.user.email or "").lower()
-is_admin = user_email in config.AUTH_ADMIN_EMAILS
-
-# First-come-first-served access, capped at AUTH_MAX_USERS - admins are
-# exempt and can free up slots from the Admin tab below.
-if not is_admin:
-    user_status = db_handler.get_user_status(user_email)
-
-    if user_status == "revoked":
-        st.error("Your access to this app has been revoked by the administrator.")
-        if st.button("OK, sign me out"):
-            st.logout()
+if config.AUTH_ENABLED:
+    if not getattr(st.user, "is_logged_in", False):
+        st.write("Please sign in with your Google account to continue.")
+        if st.button("🔐 Log in with Google", type="primary"):
+            try:
+                st.login("google")
+            except Exception as e:
+                st.error(
+                    "Google sign-in isn't configured yet. Copy "
+                    ".streamlit/secrets.toml.example to .streamlit/secrets.toml "
+                    f"and fill in your Google OAuth credentials. ({e})"
+                )
         st.stop()
 
-    if user_status != "active":
-        if db_handler.get_authorized_user_count() >= config.AUTH_MAX_USERS:
-            st.error(
-                f"This app is limited to {config.AUTH_MAX_USERS} users and that limit "
-                "has already been reached. Contact the administrator for access."
-            )
-            if st.button("Log out"):
+    user_email = (st.user.email or "").lower()
+    is_admin = user_email in config.AUTH_ADMIN_EMAILS
+
+    # First-come-first-served access, capped at AUTH_MAX_USERS - admins are
+    # exempt and can free up slots from the Admin tab below.
+    if not is_admin:
+        user_status = db_handler.get_user_status(user_email)
+
+        if user_status == "revoked":
+            st.error("Your access to this app has been revoked by the administrator.")
+            if st.button("OK, sign me out"):
                 st.logout()
             st.stop()
-        db_handler.register_user(user_email, st.user.name or user_email)
+
+        if user_status != "active":
+            if db_handler.get_authorized_user_count() >= config.AUTH_MAX_USERS:
+                st.error(
+                    f"This app is limited to {config.AUTH_MAX_USERS} users and that limit "
+                    "has already been reached. Contact the administrator for access."
+                )
+                if st.button("Log out"):
+                    st.logout()
+                st.stop()
+            db_handler.register_user(user_email, st.user.name or user_email)
+else:
+    user_email = ""
+    is_admin = False
 
 st.caption(
     "Mathematical screening (RSI, MACD, Fibonacci retracements) "
@@ -111,11 +115,12 @@ with st.sidebar:
 
     st.header("Controls")
 
-    st.caption(f"Signed in as **{st.user.name or user_email}**" + (" 👑 (admin)" if is_admin else ""))
-    if st.button("Log out", key="sidebar_logout"):
-        st.logout()
+    if config.AUTH_ENABLED:
+        st.caption(f"Signed in as **{st.user.name or user_email}**" + (" 👑 (admin)" if is_admin else ""))
+        if st.button("Log out", key="sidebar_logout"):
+            st.logout()
 
-    st.markdown("---")
+        st.markdown("---")
 
     try:
         if is_market_open():

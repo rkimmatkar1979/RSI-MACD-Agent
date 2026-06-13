@@ -1,0 +1,12 @@
+[theme]
+base = "light"
+backgroundColor = "#FAF6EC"
+secondaryBackgroundColor = "#F2ECDD"
+textColor = "#2B2A28"
+primaryColor = "#B8763E"
+
+[client]
+# Hides the top-right hamburger menu (Settings/"Rerun on save", Print,
+# Record a screencast, etc.) and the "Deploy" button for everyone, on
+# Streamlit Cloud and locally.
+toolbarMode = "minimal"

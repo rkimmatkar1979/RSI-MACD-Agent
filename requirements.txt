@@ -1,0 +1,10 @@
+streamlit
+yfinance
+pandas
+numpy
+plotly
+requests
+python-dotenv
+pytz
+Authlib
+httpx

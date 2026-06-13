@@ -71,16 +71,25 @@ is_admin = user_email in config.AUTH_ADMIN_EMAILS
 
 # First-come-first-served access, capped at AUTH_MAX_USERS - admins are
 # exempt and can free up slots from the Admin tab below.
-if not is_admin and not db_handler.is_user_authorized(user_email):
-    if db_handler.get_authorized_user_count() >= config.AUTH_MAX_USERS:
-        st.error(
-            f"This app is limited to {config.AUTH_MAX_USERS} users and that limit "
-            "has already been reached. Contact the administrator for access."
-        )
-        if st.button("Log out"):
+if not is_admin:
+    user_status = db_handler.get_user_status(user_email)
+
+    if user_status == "revoked":
+        st.error("Your access to this app has been revoked by the administrator.")
+        if st.button("OK, sign me out"):
             st.logout()
         st.stop()
-    db_handler.register_user(user_email, st.user.name or user_email)
+
+    if user_status != "active":
+        if db_handler.get_authorized_user_count() >= config.AUTH_MAX_USERS:
+            st.error(
+                f"This app is limited to {config.AUTH_MAX_USERS} users and that limit "
+                "has already been reached. Contact the administrator for access."
+            )
+            if st.button("Log out"):
+                st.logout()
+            st.stop()
+        db_handler.register_user(user_email, st.user.name or user_email)
 
 st.caption(
     "Mathematical screening (RSI, MACD, Fibonacci retracements) "
@@ -761,32 +770,42 @@ if is_admin:
         st.subheader("👑 User Access Management")
 
         users = db_handler.get_all_authorized_users()
-        st.metric("Registered users", f"{len(users)} / {config.AUTH_MAX_USERS}")
+        active_count = sum(1 for u in users if u["status"] == "active")
+        st.metric("Registered users", f"{active_count} / {config.AUTH_MAX_USERS}")
         admin_list = ", ".join(sorted(config.AUTH_ADMIN_EMAILS)) or "none configured"
         st.caption(
             "Users below were auto-registered on first Google sign-in "
             f"(first-come, first-served, capped at {config.AUTH_MAX_USERS}). "
             f"Admin account(s) ({admin_list}) always have access, don't count "
             "toward this limit, and are managed via the AUTH_ADMIN_EMAILS "
-            "setting in .env, not from this table."
+            "setting in .env, not from this table. **Revoke** signs a user out "
+            "and frees their slot; **Restore** lets them back in."
         )
 
         if not users:
             st.info("No users have signed in yet.")
         else:
-            h1, h2, h3, h4 = st.columns([3, 3, 2, 1])
+            h1, h2, h3, h4, h5 = st.columns([3, 3, 2, 1, 1])
             h1.markdown("**Email**")
             h2.markdown("**Name**")
             h3.markdown("**First login**")
-            h4.markdown("**Action**")
+            h4.markdown("**Status**")
+            h5.markdown("**Action**")
             for u in users:
-                c1, c2, c3, c4 = st.columns([3, 3, 2, 1])
+                c1, c2, c3, c4, c5 = st.columns([3, 3, 2, 1, 1])
                 c1.write(u["email"])
                 c2.write(u["name"] or "—")
                 c3.write(u["first_login"])
-                if c4.button("Revoke", key=f"revoke_{u['email']}"):
-                    db_handler.remove_authorized_user(u["email"])
-                    st.rerun()
+                if u["status"] == "active":
+                    c4.write("🟢 Active")
+                    if c5.button("Revoke", key=f"revoke_{u['email']}"):
+                        db_handler.revoke_user(u["email"])
+                        st.rerun()
+                else:
+                    c4.write("🔴 Revoked")
+                    if c5.button("Restore", key=f"restore_{u['email']}"):
+                        db_handler.restore_user(u["email"])
+                        st.rerun()
 
 # ---------------------------------------------------------------------------
 # Footer

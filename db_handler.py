@@ -13,16 +13,87 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 
+import libsql_client
 import pandas as pd
 
 import config
 
+# Raised by either backend on a query/connection failure.
+_DB_ERRORS = (sqlite3.Error, libsql_client.LibsqlError)
+
+
+class _Row:
+    """Wraps a libsql_client row + its column names so it behaves like a
+    sqlite3.Row - supports row["col"], row[0], and dict(row)."""
+
+    __slots__ = ("_columns", "_values")
+
+    def __init__(self, columns, values):
+        self._columns = columns
+        self._values = values
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            return self._values[self._columns.index(key)]
+        return self._values[key]
+
+    def keys(self):
+        return self._columns
+
+
+class _CursorResult:
+    """Mimics the subset of sqlite3's cursor interface used in this module."""
+
+    def __init__(self, result_set):
+        self._columns = list(result_set.columns)
+        self._rows = result_set.rows
+
+    def __iter__(self):
+        return (_Row(self._columns, r) for r in self._rows)
+
+    def fetchone(self):
+        if not self._rows:
+            return None
+        return _Row(self._columns, self._rows[0])
+
+    def fetchall(self):
+        return [_Row(self._columns, r) for r in self._rows]
+
+
+class _TursoConnection:
+    """Adapts a libsql_client transaction to the connection methods
+    (execute/commit/rollback/close) used by get_connection()'s callers."""
+
+    def __init__(self, url, auth_token):
+        self._client = libsql_client.create_client_sync(url, auth_token=auth_token)
+        self._tx = self._client.transaction()
+
+    def execute(self, sql, params=()):
+        return _CursorResult(self._tx.execute(sql, list(params)))
+
+    def commit(self):
+        self._tx.commit()
+
+    def rollback(self):
+        self._tx.rollback()
+
+    def close(self):
+        self._client.close()
+
 
 @contextmanager
 def get_connection():
-    """Yields a SQLite connection, committing on success and rolling back on error."""
-    conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
+    """Yields a connection, committing on success and rolling back on error.
+
+    Uses a hosted Turso (libSQL) database when TURSO_DATABASE_URL /
+    TURSO_AUTH_TOKEN are configured - so data survives Streamlit Cloud
+    restarts/redeploys - otherwise falls back to the local SQLite file.
+    """
+    if config.TURSO_DATABASE_URL:
+        conn = _TursoConnection(config.TURSO_DATABASE_URL, config.TURSO_AUTH_TOKEN)
+    else:
+        conn = sqlite3.connect(config.DB_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
     try:
         yield conn
         conn.commit()
@@ -99,9 +170,15 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS authorized_users (
                     email TEXT PRIMARY KEY,
                     name TEXT,
-                    first_login TEXT NOT NULL
+                    first_login TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active'
                 )
             """)
+
+            # Migration: add status to a table created by an older version.
+            existing_user_cols = {row["name"] for row in conn.execute("PRAGMA table_info(authorized_users)")}
+            if "status" not in existing_user_cols:
+                conn.execute("ALTER TABLE authorized_users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
 
             # Migration: add new columns to a signals table created by an
             # older version of this app, which won't have them yet.
@@ -124,7 +201,7 @@ def init_db():
             ):
                 if col not in existing_cols:
                     conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {col_type}")
-    except sqlite3.Error as e:
+    except _DB_ERRORS as e:
         print(f"[db_handler] Failed to initialize database: {e}")
         raise
 
@@ -198,7 +275,7 @@ def save_scan_results(shortlist_df, ai_commentary, universe_size):
                     ),
                 )
         return scan_date
-    except sqlite3.Error as e:
+    except _DB_ERRORS as e:
         print(f"[db_handler] Failed to save scan results: {e}")
         raise
 
@@ -220,7 +297,7 @@ def get_cached_ai_commentary(prompt_hash):
                 (prompt_hash, f"{today}%"),
             ).fetchone()
         return row["commentary"] if row else None
-    except sqlite3.Error as e:
+    except _DB_ERRORS as e:
         print(f"[db_handler] Failed to read AI commentary cache: {e}")
         return None
 
@@ -245,7 +322,7 @@ def save_ai_commentary_cache(prompt_hash, commentary):
                 "DELETE FROM ai_commentary_cache WHERE created_at NOT LIKE ?",
                 (f"{today}%",),
             )
-    except sqlite3.Error as e:
+    except _DB_ERRORS as e:
         print(f"[db_handler] Failed to write AI commentary cache: {e}")
 
 
@@ -280,7 +357,7 @@ def get_latest_scan():
             ).fetchall()
 
         return scan_row["scan_date"], scan_row["ai_commentary"], _rows_to_signals_df(signal_rows)
-    except sqlite3.Error as e:
+    except _DB_ERRORS as e:
         print(f"[db_handler] Failed to fetch latest scan: {e}")
         return None
 
@@ -293,7 +370,7 @@ def get_available_scan_dates():
                 "SELECT scan_date FROM scans ORDER BY scan_date DESC"
             ).fetchall()
         return [r["scan_date"] for r in rows]
-    except sqlite3.Error as e:
+    except _DB_ERRORS as e:
         print(f"[db_handler] Failed to fetch scan dates: {e}")
         return []
 
@@ -314,70 +391,97 @@ def get_scan_by_date(scan_date):
             ).fetchall()
 
         return scan_row["scan_date"], scan_row["ai_commentary"], _rows_to_signals_df(signal_rows)
-    except sqlite3.Error as e:
+    except _DB_ERRORS as e:
         print(f"[db_handler] Failed to fetch scan for {scan_date}: {e}")
         return None
 
 
 def is_user_authorized(email):
-    """Returns True if this email has already been granted access (a prior login)."""
+    """Returns True if this email currently has active access."""
     try:
         with get_connection() as conn:
             row = conn.execute(
-                "SELECT 1 FROM authorized_users WHERE email = ?", (email,)
+                "SELECT 1 FROM authorized_users WHERE email = ? AND status = 'active'", (email,)
             ).fetchone()
         return row is not None
-    except sqlite3.Error as e:
+    except _DB_ERRORS as e:
         print(f"[db_handler] Failed to check authorized user {email}: {e}")
         return False
 
 
-def get_authorized_user_count():
-    """Returns the number of distinct emails that have ever been granted access."""
+def get_user_status(email):
+    """Returns 'active', 'revoked', or None if this email has never registered."""
     try:
         with get_connection() as conn:
-            row = conn.execute("SELECT COUNT(*) AS n FROM authorized_users").fetchone()
+            row = conn.execute(
+                "SELECT status FROM authorized_users WHERE email = ?", (email,)
+            ).fetchone()
+        return row["status"] if row else None
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to get status for {email}: {e}")
+        return None
+
+
+def get_authorized_user_count():
+    """Returns the number of emails with currently-active access (toward AUTH_MAX_USERS)."""
+    try:
+        with get_connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM authorized_users WHERE status = 'active'"
+            ).fetchone()
         return row["n"]
-    except sqlite3.Error as e:
+    except _DB_ERRORS as e:
         print(f"[db_handler] Failed to count authorized users: {e}")
         return 0
 
 
 def register_user(email, name):
     """
-    Grants a new email access (counts toward AUTH_MAX_USERS). Safe to call
-    even if the email is already registered - existing rows are left as-is.
+    Grants a new email active access (counts toward AUTH_MAX_USERS). Safe to
+    call even if the email is already registered - existing rows (including
+    previously-revoked ones) are left as-is.
     """
     try:
         with get_connection() as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO authorized_users (email, name, first_login) "
-                "VALUES (?, ?, ?)",
+                "INSERT OR IGNORE INTO authorized_users (email, name, first_login, status) "
+                "VALUES (?, ?, ?, 'active')",
                 (email, name, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
             )
-    except sqlite3.Error as e:
+    except _DB_ERRORS as e:
         print(f"[db_handler] Failed to register user {email}: {e}")
         raise
 
 
 def get_all_authorized_users():
-    """Returns all registered users as a list of dicts, oldest first."""
+    """Returns all registered users (active and revoked) as a list of dicts, oldest first."""
     try:
         with get_connection() as conn:
             rows = conn.execute(
-                "SELECT email, name, first_login FROM authorized_users ORDER BY first_login ASC"
+                "SELECT email, name, first_login, status FROM authorized_users ORDER BY first_login ASC"
             ).fetchall()
         return [dict(r) for r in rows]
-    except sqlite3.Error as e:
+    except _DB_ERRORS as e:
         print(f"[db_handler] Failed to fetch authorized users: {e}")
         return []
 
 
-def remove_authorized_user(email):
-    """Revokes a registered user's access slot (frees it up for someone else)."""
+def revoke_user(email):
+    """Revokes a user's access - they'll be signed out on their next interaction
+    and their slot frees up for someone else."""
     try:
         with get_connection() as conn:
-            conn.execute("DELETE FROM authorized_users WHERE email = ?", (email,))
-    except sqlite3.Error as e:
-        print(f"[db_handler] Failed to remove authorized user {email}: {e}")
+            conn.execute("UPDATE authorized_users SET status = 'revoked' WHERE email = ?", (email,))
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to revoke user {email}: {e}")
+        raise
+
+
+def restore_user(email):
+    """Restores a previously-revoked user's access."""
+    try:
+        with get_connection() as conn:
+            conn.execute("UPDATE authorized_users SET status = 'active' WHERE email = ?", (email,))
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to restore user {email}: {e}")
         raise

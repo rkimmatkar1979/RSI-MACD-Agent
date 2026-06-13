@@ -157,6 +157,12 @@ MARKET_CLOSE_TIME = "15:30"
 # ---------------------------------------------------------------------------
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trading_agent.db")
 
+# Optional hosted Turso (libSQL) database - if both are set, db_handler uses
+# Turso instead of the local SQLite file, so data survives Streamlit Cloud
+# restarts/redeploys. Leave unset for local SQLite (the default).
+TURSO_DATABASE_URL = _get_setting("TURSO_DATABASE_URL", "")
+TURSO_AUTH_TOKEN = _get_setting("TURSO_AUTH_TOKEN", "")
+
 # ---------------------------------------------------------------------------
 # Authentication (Google OAuth via Streamlit's built-in st.login/st.user -
 # requires Authlib and a [auth] / [auth.google] section in

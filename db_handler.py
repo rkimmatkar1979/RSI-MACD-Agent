@@ -61,21 +61,29 @@ class _CursorResult:
 
 
 class _TursoConnection:
-    """Adapts a libsql_client transaction to the connection methods
-    (execute/commit/rollback/close) used by get_connection()'s callers."""
+    """Adapts a libsql_client HTTP client to the connection methods
+    (execute/commit/rollback/close) used by get_connection()'s callers.
+
+    Uses the HTTP-based Hrana protocol (https://) rather than the
+    WebSocket-based one (libsql:// / wss://): Streamlit Community Cloud's
+    network breaks the WebSocket upgrade, causing a WSServerHandshakeError.
+    The HTTP client has no transactions, so each statement commits
+    immediately and commit()/rollback() are no-ops.
+    """
 
     def __init__(self, url, auth_token):
+        if url.startswith("libsql://"):
+            url = "https://" + url[len("libsql://"):]
         self._client = libsql_client.create_client_sync(url, auth_token=auth_token)
-        self._tx = self._client.transaction()
 
     def execute(self, sql, params=()):
-        return _CursorResult(self._tx.execute(sql, list(params)))
+        return _CursorResult(self._client.execute(sql, list(params)))
 
     def commit(self):
-        self._tx.commit()
+        pass
 
     def rollback(self):
-        self._tx.rollback()
+        pass
 
     def close(self):
         self._client.close()

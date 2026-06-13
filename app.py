@@ -198,13 +198,42 @@ if selected_date != scan_date:
 # ---------------------------------------------------------------------------
 selected_rows = []
 
-tab_names = ["📋 Shortlist", "🤖 AI Commentary", "📐 Chart Analysis"]
-if is_admin:
-    tab_names.append("👑 Admin")
+TAB_SHORTLIST = "📋 Shortlist"
+TAB_AI = "🤖 AI Commentary"
+TAB_CHART = "📐 Chart Analysis"
+TAB_ADMIN = "👑 Admin"
+_TAB_CONTAINER_KEYS = {
+    TAB_SHORTLIST: "shortlist", TAB_AI: "ai", TAB_CHART: "chart", TAB_ADMIN: "admin",
+}
 
-tabs = st.tabs(tab_names)
-tab_shortlist, tab_ai, tab_chart = tabs[0], tabs[1], tabs[2]
-tab_admin = tabs[3] if is_admin else None
+tab_names = [TAB_SHORTLIST, TAB_AI, TAB_CHART]
+if is_admin:
+    tab_names.append(TAB_ADMIN)
+
+# st.tabs() doesn't persist the active tab across reruns triggered by a
+# widget in a DIFFERENT tab (e.g. the Chart Analysis ticker selector) - it
+# snaps back to the first tab. st.segmented_control is a normal
+# session_state-backed widget, so it keeps whichever "tab" the user is on;
+# each section below is rendered into its own container, and all but the
+# active one are hidden via CSS.
+if st.session_state.get("active_tab") not in tab_names:
+    st.session_state["active_tab"] = tab_names[0]
+active_tab = st.segmented_control(
+    "View", tab_names, required=True, key="active_tab", label_visibility="collapsed",
+)
+
+for name in tab_names:
+    if name != active_tab:
+        st.markdown(
+            f"<style>div[class*='st-key-tab_{_TAB_CONTAINER_KEYS[name]}'] "
+            "{ display: none; }</style>",
+            unsafe_allow_html=True,
+        )
+
+tab_shortlist = st.container(key="tab_shortlist")
+tab_ai = st.container(key="tab_ai")
+tab_chart = st.container(key="tab_chart")
+tab_admin = st.container(key="tab_admin") if is_admin else None
 
 # ---------------------------------------------------------------------------
 # Shortlist table styling - color cues so strong/weak signals are visible at

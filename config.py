@@ -140,7 +140,7 @@ SHORTLIST_MIN_SCORE = 20  # ignore stocks with a weak/no setup
 # ---------------------------------------------------------------------------
 # How many top-ranked shortlist entries get a full Entry/Stop-Loss/Take-Profit
 # write-up (and a news headline lookup) from the AI analyst.
-AI_TOP_PICKS_COUNT = 5
+AI_TOP_PICKS_COUNT = 8
 # Recent news headlines fetched per ticker (via yfinance) for AI context.
 NEWS_HEADLINE_COUNT = 3
 

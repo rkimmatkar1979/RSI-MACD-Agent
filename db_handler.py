@@ -60,21 +60,36 @@ class _CursorResult:
         return [_Row(self._columns, r) for r in self._rows]
 
 
+_turso_client = None
+
+
+def _get_turso_client(url, auth_token):
+    """Returns a process-wide libsql_client, created once and reused for
+    every get_connection() call - creating a new client per query spins up
+    a new thread, event loop and HTTP session each time, which made every
+    page interaction noticeably slower once the app moved to Turso."""
+    global _turso_client
+    if _turso_client is None:
+        if url.startswith("libsql://"):
+            url = "https://" + url[len("libsql://"):]
+        _turso_client = libsql_client.create_client_sync(url, auth_token=auth_token)
+    return _turso_client
+
+
 class _TursoConnection:
-    """Adapts a libsql_client HTTP client to the connection methods
+    """Adapts the shared libsql_client HTTP client to the connection methods
     (execute/commit/rollback/close) used by get_connection()'s callers.
 
     Uses the HTTP-based Hrana protocol (https://) rather than the
     WebSocket-based one (libsql:// / wss://): Streamlit Community Cloud's
     network breaks the WebSocket upgrade, causing a WSServerHandshakeError.
     The HTTP client has no transactions, so each statement commits
-    immediately and commit()/rollback() are no-ops.
+    immediately and commit()/rollback() are no-ops. The underlying client is
+    a process-wide singleton (see _get_turso_client), so close() is a no-op.
     """
 
     def __init__(self, url, auth_token):
-        if url.startswith("libsql://"):
-            url = "https://" + url[len("libsql://"):]
-        self._client = libsql_client.create_client_sync(url, auth_token=auth_token)
+        self._client = _get_turso_client(url, auth_token)
 
     def execute(self, sql, params=()):
         return _CursorResult(self._client.execute(sql, list(params)))
@@ -86,7 +101,7 @@ class _TursoConnection:
         pass
 
     def close(self):
-        self._client.close()
+        pass
 
 
 @contextmanager

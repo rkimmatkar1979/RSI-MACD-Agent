@@ -101,12 +101,52 @@ else:
     user_email = ""
     is_admin = False
 
+# ---------------------------------------------------------------------------
+# Run a fresh scan on demand - rendered as its own minimal page (just a
+# progress bar, no sidebar/tabs/other widgets) so nothing else on screen can
+# trigger a competing rerun that would cancel the scan partway through (e.g.
+# switching tabs used to abort an in-progress scan).
+# ---------------------------------------------------------------------------
+if st.session_state.get("scan_in_progress"):
+    st.info(
+        "🔄 Running full Nifty 100 scan and requesting AI commentary - this "
+        "takes a minute or two. The page will refresh automatically when done."
+    )
+    progress_bar = st.progress(0.0, text="Starting scan...")
+
+    def _progress_cb(i, total, ticker):
+        progress_bar.progress(i / total, text=f"Scanning {ticker} ({i}/{total})")
+
+    try:
+        shortlist, ai_commentary, scan_date = run_pipeline(progress_callback=_progress_cb)
+        # The new scan's results would otherwise be hidden behind the 5-minute
+        # cache on these DB reads (see db_handler) - clear it so this scan
+        # shows up immediately below.
+        db_handler.get_latest_scan.clear()
+        db_handler.get_available_scan_dates.clear()
+        db_handler.get_scan_by_date.clear()
+        st.session_state["scan_message"] = (
+            "success",
+            f"Scan complete for {scan_date}: {len(shortlist)} qualifying setup(s) found.",
+        )
+    except Exception as e:
+        st.session_state["scan_message"] = ("error", f"Scan failed: {e}")
+    finally:
+        st.session_state["scan_in_progress"] = False
+    st.rerun()
+
 st.caption(
     "Mathematical screening (RSI, MACD, Fibonacci retracements) "
     "+ Grok AI commentary, tuned for 2-3 week swing setups."
 )
 
-run_clicked = st.button("🔍 Run Full Scan Now", type="primary", use_container_width=True)
+if st.button("🔍 Run Full Scan Now", type="primary", width="stretch"):
+    st.session_state["scan_in_progress"] = True
+    st.rerun()
+
+if "scan_message" in st.session_state:
+    level, message = st.session_state.pop("scan_message")
+    getattr(st, level)(message)
 
 # ---------------------------------------------------------------------------
 # Sidebar - controls
@@ -156,30 +196,6 @@ with st.sidebar:
         f"Buy/Sell pressure: {config.BUY_SELL_PRESSURE_WINDOW}-day volume split by "
         "up-days vs down-days (proxy, not live order-book data)"
     )
-
-# ---------------------------------------------------------------------------
-# Run a fresh scan on demand
-# ---------------------------------------------------------------------------
-if run_clicked:
-    progress_bar = st.progress(0.0, text="Starting scan...")
-
-    def _progress_cb(i, total, ticker):
-        progress_bar.progress(i / total, text=f"Scanning {ticker} ({i}/{total})")
-
-    try:
-        with st.spinner("Running full Nifty 100 scan and requesting AI commentary..."):
-            shortlist, ai_commentary, scan_date = run_pipeline(progress_callback=_progress_cb)
-        # The new scan's results would otherwise be hidden behind the 5-minute
-        # cache on these DB reads (see db_handler) - clear it so this scan
-        # shows up immediately below.
-        db_handler.get_latest_scan.clear()
-        db_handler.get_available_scan_dates.clear()
-        db_handler.get_scan_by_date.clear()
-        progress_bar.empty()
-        st.success(f"Scan complete for {scan_date}: {len(shortlist)} qualifying setup(s) found.")
-    except Exception as e:
-        progress_bar.empty()
-        st.error(f"Scan failed: {e}")
 
 # ---------------------------------------------------------------------------
 # Load latest (or selected) results
@@ -339,12 +355,15 @@ stock's own signals.
             lambda r: f"{r['buy_pct']:.0f}% / {r['sell_pct']:.0f}%", axis=1
         )
         display_df["sector_trend_display"] = (display_df["sector_trend_pct"] * 100).round(2)
+        display_df["signals_display"] = display_df["reasons"].apply(
+            lambda r: "; ".join(r) if r else "-"
+        )
 
         display_df = display_df[[
             "ticker", "sector", "close", "rsi", "macd_hist_display", "nearest_fib_level",
             "nearest_fib_price", "fib_distance_pct", "week52_high",
             "pct_from_52w_high", "volume_ratio", "buy_sell_display",
-            "sector_trend_display", "score",
+            "sector_trend_display", "score", "signals_display",
         ]].rename(columns={
             "ticker": "Ticker",
             "sector": "Sector",
@@ -360,6 +379,7 @@ stock's own signals.
             "buy_sell_display": "Buy % / Sell %",
             "sector_trend_display": "Sector Trend % (10D)",
             "score": "Score",
+            "signals_display": "Signals",
         })
         display_df["Fib Dist %"] = (display_df["Fib Dist %"] * 100).round(2)
         display_df["% From 52W High"] = (display_df["% From 52W High"] * 100).round(2)
@@ -375,10 +395,20 @@ stock's own signals.
             "Ticker", "Sector", "Price", "RSI", "MACD-Signal Diff (dir)",
             "Nearest Fib", "Fib Dist %", "Score",
         ]
-        show_all_cols = st.checkbox(
-            "Show all columns (52W high, volume, buy/sell pressure, sector trend)",
-            value=False,
-        )
+        col_check, col_download = st.columns([3, 1])
+        with col_check:
+            show_all_cols = st.checkbox(
+                "Show all columns (52W high, volume, buy/sell pressure, sector trend)",
+                value=False,
+            )
+        with col_download:
+            st.download_button(
+                "📥 Download CSV",
+                data=display_df.to_csv(index=False).encode("utf-8"),
+                file_name=f"nifty100_shortlist_{scan_date}.csv",
+                mime="text/csv",
+                width="stretch",
+            )
         table_df = display_df if show_all_cols else display_df[compact_columns]
 
         # With all columns shown, let the table keep its natural (wider)

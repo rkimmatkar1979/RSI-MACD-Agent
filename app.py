@@ -40,11 +40,17 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# init_db() runs idempotent CREATE TABLE/ALTER checks - only needed once per
-# session, not on every script rerun (every button click / row selection).
-if "db_initialized" not in st.session_state:
+# init_db() runs idempotent CREATE TABLE/ALTER checks - with a remote Turso
+# database each check is a network round-trip, so this is cached process-wide
+# (st.cache_resource) to run once per app deployment rather than once per
+# browser session.
+@st.cache_resource(show_spinner="Initializing database...")
+def _ensure_db_initialized():
     db_handler.init_db()
-    st.session_state["db_initialized"] = True
+    return True
+
+
+_ensure_db_initialized()
 
 st.title("📈 Nifty 100 Swing Trading Agent")
 
@@ -163,6 +169,12 @@ if run_clicked:
     try:
         with st.spinner("Running full Nifty 100 scan and requesting AI commentary..."):
             shortlist, ai_commentary, scan_date = run_pipeline(progress_callback=_progress_cb)
+        # The new scan's results would otherwise be hidden behind the 5-minute
+        # cache on these DB reads (see db_handler) - clear it so this scan
+        # shows up immediately below.
+        db_handler.get_latest_scan.clear()
+        db_handler.get_available_scan_dates.clear()
+        db_handler.get_scan_by_date.clear()
         progress_bar.empty()
         st.success(f"Scan complete for {scan_date}: {len(shortlist)} qualifying setup(s) found.")
     except Exception as e:
@@ -222,13 +234,26 @@ active_tab = st.segmented_control(
     "View", tab_names, required=True, key="active_tab", label_visibility="collapsed",
 )
 
-for name in tab_names:
-    if name != active_tab:
-        st.markdown(
-            f"<style>div[class*='st-key-tab_{_TAB_CONTAINER_KEYS[name]}'] "
-            "{ display: none; }</style>",
-            unsafe_allow_html=True,
-        )
+# One combined <style> block (rather than one st.markdown call per hidden
+# tab) - fewer elements for Streamlit to ship to the frontend on every rerun.
+# Also fades the active tab's container in on each switch - a CSS animation
+# replays whenever an element goes from display:none to visible, so this
+# gives a smooth transition without changing the hide/show mechanism itself.
+_hidden_selectors = ", ".join(
+    f"div[class*='st-key-tab_{_TAB_CONTAINER_KEYS[name]}']"
+    for name in tab_names if name != active_tab
+)
+_hide_rule = f"{_hidden_selectors} {{ display: none; }}" if _hidden_selectors else ""
+st.markdown(
+    f"""
+    <style>
+    {_hide_rule}
+    @keyframes tabFadeIn {{ from {{ opacity: 0; }} to {{ opacity: 1; }} }}
+    div[class*="st-key-tab_"] {{ animation: tabFadeIn 0.2s ease-in-out; }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 tab_shortlist = st.container(key="tab_shortlist")
 tab_ai = st.container(key="tab_ai")
@@ -646,8 +671,13 @@ with tab_chart:
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                 paper_bgcolor="#FAF6EC",
                 plot_bgcolor="#FFFDF6",
-                font_color="#2B2A28",
+                font_color="#000000",
             )
+            # Pure black, slightly heavier axis/tick text plus a visible grey
+            # grid - the previous warm near-black (#2B2A28) on the cream chart
+            # background didn't stand out enough.
+            fig.update_xaxes(gridcolor="#D0D0D0", zerolinecolor="#A0A0A0", tickfont=dict(color="#000000"))
+            fig.update_yaxes(gridcolor="#D0D0D0", zerolinecolor="#A0A0A0", tickfont=dict(color="#000000"))
             fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1, secondary_y=True)
             fig.update_xaxes(title_text="Date", tickformat="%d %b %Y", row=3, col=1)
             st.plotly_chart(fig, use_container_width=True)

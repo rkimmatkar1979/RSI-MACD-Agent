@@ -15,6 +15,7 @@ from datetime import datetime
 
 import libsql_client
 import pandas as pd
+import streamlit as st
 
 import config
 
@@ -364,6 +365,7 @@ def _rows_to_signals_df(signal_rows):
     return pd.DataFrame(records)
 
 
+@st.cache_data(ttl=300, show_spinner="Loading latest scan...")
 def get_latest_scan():
     """Returns (scan_date, ai_commentary, signals_df) for the most recent scan, or None."""
     try:
@@ -385,6 +387,7 @@ def get_latest_scan():
         return None
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def get_available_scan_dates():
     """Returns all scan dates (YYYY-MM-DD), most recent first."""
     try:
@@ -398,6 +401,7 @@ def get_available_scan_dates():
         return []
 
 
+@st.cache_data(ttl=300, show_spinner="Loading scan...")
 def get_scan_by_date(scan_date):
     """Returns (scan_date, ai_commentary, signals_df) for a specific date, or None."""
     try:

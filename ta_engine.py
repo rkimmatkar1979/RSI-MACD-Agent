@@ -134,7 +134,7 @@ def calculate_fibonacci_levels(df, lookback=config.FIB_LOOKBACK_DAYS):
     return levels, peak, trough
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner="📊 Fetching chart data...")
 def get_chart_data(ticker):
     """
     Fetches OHLCV data and computes RSI/MACD/Fibonacci levels for a ticker

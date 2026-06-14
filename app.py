@@ -11,7 +11,9 @@ from plotly.subplots import make_subplots
 
 import config
 import db_handler
+from ai_analyst import get_ai_recommendations
 from scheduler import is_market_open, run_pipeline
+from strategy import generate_shortlist
 from ta_engine import (
     calculate_buy_sell_pressure,
     calculate_volume_metrics,
@@ -101,6 +103,12 @@ else:
     user_email = ""
     is_admin = False
 
+# The Custom Analysis tab (below) is gated on this rather than is_admin alone
+# - with auth disabled there's no concept of "other users" yet, so the tool
+# is available to whoever is running the app; once AUTH_ENABLED is turned on
+# it automatically locks down to AUTH_ADMIN_EMAILS only.
+can_use_admin_tools = is_admin or not config.AUTH_ENABLED
+
 # ---------------------------------------------------------------------------
 # Run a fresh scan on demand - rendered as its own minimal page (just a
 # progress bar, no sidebar/tabs/other widgets) so nothing else on screen can
@@ -135,12 +143,46 @@ if st.session_state.get("scan_in_progress"):
         st.session_state["scan_in_progress"] = False
     st.rerun()
 
+# ---------------------------------------------------------------------------
+# Run a custom AI analysis on demand (Custom Analysis tab, below) - same
+# minimal-page pattern as the full scan above, so it can't be cancelled by
+# clicking elsewhere on the page while it runs.
+# ---------------------------------------------------------------------------
+if st.session_state.get("custom_analysis_in_progress"):
+    custom_tickers = st.session_state.get("custom_analysis_request", [])
+    st.info(
+        f"🔄 Running custom AI analysis for {len(custom_tickers)} stock(s) - "
+        "this takes a minute or so. The page will refresh automatically when done."
+    )
+    progress_bar = st.progress(0.0, text="Starting analysis...")
+
+    def _custom_progress_cb(i, total, ticker):
+        progress_bar.progress(i / total, text=f"Analyzing {ticker} ({i}/{total})")
+
+    try:
+        custom_df = generate_shortlist(tickers=custom_tickers, progress_callback=_custom_progress_cb)
+        progress_bar.progress(1.0, text="Fetching news and generating AI commentary...")
+        custom_commentary = get_ai_recommendations(custom_df)
+        st.session_state["custom_analysis_result"] = (custom_tickers, custom_df, custom_commentary)
+    except Exception as e:
+        st.session_state["custom_analysis_result"] = (custom_tickers, pd.DataFrame(), f"Analysis failed: {e}")
+    finally:
+        st.session_state["custom_analysis_in_progress"] = False
+        st.session_state.pop("custom_analysis_request", None)
+    st.rerun()
+
 st.caption(
     "Mathematical screening (RSI, MACD, Fibonacci retracements) "
     "+ Grok AI commentary, tuned for 2-3 week swing setups."
 )
 
 if st.button("🔍 Run Full Scan Now", type="primary", width="stretch"):
+    # The minimal "in progress" page below doesn't render the tab selector,
+    # so its session_state entry gets dropped during that run - stash the
+    # active tab here and restore it once the tab selector renders again
+    # (see the tabs section below), so the page doesn't snap back to the
+    # first tab once the scan completes.
+    st.session_state["_pending_active_tab"] = st.session_state.get("active_tab")
     st.session_state["scan_in_progress"] = True
     st.rerun()
 
@@ -229,12 +271,16 @@ selected_rows = []
 TAB_SHORTLIST = "📋 Shortlist"
 TAB_AI = "🤖 AI Commentary"
 TAB_CHART = "📐 Chart Analysis"
+TAB_CUSTOM = "🎯 Custom Analysis"
 TAB_ADMIN = "👑 Admin"
 _TAB_CONTAINER_KEYS = {
-    TAB_SHORTLIST: "shortlist", TAB_AI: "ai", TAB_CHART: "chart", TAB_ADMIN: "admin",
+    TAB_SHORTLIST: "shortlist", TAB_AI: "ai", TAB_CHART: "chart",
+    TAB_CUSTOM: "custom", TAB_ADMIN: "admin",
 }
 
 tab_names = [TAB_SHORTLIST, TAB_AI, TAB_CHART]
+if can_use_admin_tools:
+    tab_names.append(TAB_CUSTOM)
 if is_admin:
     tab_names.append(TAB_ADMIN)
 
@@ -244,6 +290,13 @@ if is_admin:
 # session_state-backed widget, so it keeps whichever "tab" the user is on;
 # each section below is rendered into its own container, and all but the
 # active one are hidden via CSS.
+# Restore the tab that was active before a "Run Full Scan Now" /
+# "Get AI Analysis" cycle, if one just finished (see those button handlers).
+if "_pending_active_tab" in st.session_state:
+    _restored_tab = st.session_state.pop("_pending_active_tab")
+    if _restored_tab in tab_names:
+        st.session_state["active_tab"] = _restored_tab
+
 if st.session_state.get("active_tab") not in tab_names:
     st.session_state["active_tab"] = tab_names[0]
 active_tab = st.segmented_control(
@@ -274,6 +327,7 @@ st.markdown(
 tab_shortlist = st.container(key="tab_shortlist")
 tab_ai = st.container(key="tab_ai")
 tab_chart = st.container(key="tab_chart")
+tab_custom = st.container(key="tab_custom") if can_use_admin_tools else None
 tab_admin = st.container(key="tab_admin") if is_admin else None
 
 # ---------------------------------------------------------------------------
@@ -857,7 +911,68 @@ with tab_chart:
         st.info("Run a scan to enable the Fibonacci retracement analysis.")
 
 # ---------------------------------------------------------------------------
-# Tab 4: Admin - manage who can access this app (admins only)
+# Tab 4: Custom Analysis - on-demand AI Entry/Stop-Loss/Take-Profit write-up
+# for any stocks picked from the scan universe, not just the daily shortlist.
+# ---------------------------------------------------------------------------
+if can_use_admin_tools:
+    with tab_custom:
+        st.subheader("🎯 Custom Stock Analysis")
+        st.caption(
+            "Get the same AI-generated Entry / Stop-Loss / Take-Profit write-up "
+            f"for any {config.CUSTOM_ANALYSIS_MIN_TICKERS}-{config.AI_TOP_PICKS_COUNT} "
+            "stocks you pick from the scan universe - useful for checking setups "
+            "outside the daily shortlist. Each request makes one LLM call, so a "
+            f"minimum of {config.CUSTOM_ANALYSIS_MIN_TICKERS} stocks is required."
+        )
+
+        custom_selection = st.multiselect(
+            "Select stocks to analyze",
+            options=sorted(config.SCAN_UNIVERSE),
+            max_selections=config.AI_TOP_PICKS_COUNT,
+            key="custom_analysis_tickers",
+        )
+
+        n_selected = len(custom_selection)
+        if n_selected < config.CUSTOM_ANALYSIS_MIN_TICKERS:
+            st.info(
+                f"Select at least {config.CUSTOM_ANALYSIS_MIN_TICKERS} stocks "
+                f"({n_selected} selected so far)."
+            )
+        elif st.button("🤖 Get AI Analysis", type="primary", key="run_custom_analysis"):
+            # See the comment on the "Run Full Scan Now" button - stash the
+            # active tab so it's restored (instead of snapping back to the
+            # first tab) once the analysis completes.
+            st.session_state["_pending_active_tab"] = st.session_state.get("active_tab")
+            st.session_state["custom_analysis_in_progress"] = True
+            st.session_state["custom_analysis_request"] = custom_selection
+            st.rerun()
+
+        if "custom_analysis_result" in st.session_state:
+            result_tickers, result_df, result_commentary = st.session_state["custom_analysis_result"]
+            st.markdown("---")
+            st.markdown(f"**Results for:** {', '.join(result_tickers)}")
+            st.markdown(result_commentary if result_commentary else "_No commentary available._")
+
+            if not result_df.empty:
+                with st.expander("📊 Underlying technical data", expanded=False):
+                    custom_table = result_df.copy()
+                    custom_table["signals"] = custom_table["reasons"].apply(
+                        lambda r: "; ".join(r) if r else "-"
+                    )
+                    custom_table = custom_table[[
+                        "ticker", "sector", "close", "rsi", "macd_hist",
+                        "nearest_fib_level", "fib_distance_pct", "score", "signals",
+                    ]].rename(columns={
+                        "ticker": "Ticker", "sector": "Sector", "close": "CMP",
+                        "rsi": "RSI", "macd_hist": "MACD-Signal Diff",
+                        "nearest_fib_level": "Nearest Fib", "fib_distance_pct": "Fib Dist %",
+                        "score": "Score", "signals": "Signals",
+                    })
+                    custom_table["Fib Dist %"] = (custom_table["Fib Dist %"] * 100).round(2)
+                    st.dataframe(custom_table, hide_index=True, width="stretch")
+
+# ---------------------------------------------------------------------------
+# Tab 5: Admin - manage who can access this app (admins only)
 # ---------------------------------------------------------------------------
 if is_admin:
     with tab_admin:

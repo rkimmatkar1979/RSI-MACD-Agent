@@ -10,6 +10,7 @@ yfinance and included as extra context.
 """
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -73,12 +74,30 @@ def _format_news(tickers):
     """
     Fetches recent headlines for each ticker and formats them as a block.
 
+    Tickers are fetched concurrently (config.SCAN_MAX_WORKERS threads) since
+    each is a separate network round-trip to Yahoo Finance - fetching
+    AI_TOP_PICKS_COUNT tickers sequentially was the dominant cost of an AI
+    commentary request. Output is still assembled in `tickers` order so the
+    formatted block (and therefore the resulting prompt hash) stays
+    deterministic regardless of fetch completion order.
+
     Returns a plain-text section listing up to config.NEWS_HEADLINE_COUNT
     headlines per ticker, or a note that none were found.
     """
+    headlines_by_ticker = {}
+    with ThreadPoolExecutor(max_workers=min(len(tickers), config.SCAN_MAX_WORKERS)) as executor:
+        future_to_ticker = {executor.submit(fetch_news, t): t for t in tickers}
+        for future in as_completed(future_to_ticker):
+            ticker = future_to_ticker[future]
+            try:
+                headlines_by_ticker[ticker] = future.result()
+            except Exception as e:
+                print(f"[ai_analyst] Failed to fetch news for {ticker}: {e}")
+                headlines_by_ticker[ticker] = []
+
     lines = []
     for ticker in tickers:
-        headlines = fetch_news(ticker)
+        headlines = headlines_by_ticker.get(ticker, [])
         if headlines:
             lines.append(f"{ticker}:")
             for headline in headlines:

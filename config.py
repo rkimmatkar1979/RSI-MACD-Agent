@@ -144,6 +144,13 @@ AI_TOP_PICKS_COUNT = 8
 # Recent news headlines fetched per ticker (via yfinance) for AI context.
 NEWS_HEADLINE_COUNT = 3
 
+# Minimum number of tickers that must be selected on the Custom Analysis tab
+# before an AI write-up can be requested - keeps each on-demand LLM call
+# covering enough stocks to be worth the request. The multiselect there is
+# capped at AI_TOP_PICKS_COUNT so every selected ticker gets a write-up with
+# no truncation.
+CUSTOM_ANALYSIS_MIN_TICKERS = 5
+
 # ---------------------------------------------------------------------------
 # Market hours (informational only - the agent is run on demand, not on
 # an automatic background schedule)

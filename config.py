@@ -164,6 +164,12 @@ MARKET_CLOSE_TIME = "15:30"
 # ---------------------------------------------------------------------------
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trading_agent.db")
 
+# How many of the most recent scan dates (rows in `scans`/`signals`) to keep -
+# older ones are deleted in save_scan_results(). Bounds DB growth while still
+# giving the day-over-day diff and score-history sparkline on the Shortlist
+# tab a few prior sessions to compare against.
+SCAN_HISTORY_RETENTION_DAYS = 5
+
 # Optional hosted Turso (libSQL) database - if both are set, db_handler uses
 # Turso instead of the local SQLite file, so data survives Streamlit Cloud
 # restarts/redeploys. Leave unset for local SQLite (the default).

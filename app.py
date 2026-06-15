@@ -30,13 +30,111 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+# Dark mode toggle - the widget itself lives in the sidebar (below), but its
+# session_state value is available here too (Streamlit syncs it before the
+# script runs), so the colour tokens and CSS for the whole page can be picked
+# before anything else renders.
+dark_mode = st.session_state.get("dark_mode", False)
+
+# Colour tokens shared by the CSS below, the Shortlist/Custom Analysis tables
+# (pandas Styler), and the Plotly chart layouts - keeping a single
+# light/dark palette here means every themed element stays in sync.
+if dark_mode:
+    COLOR_APP_BG = "#0E1117"
+    COLOR_SECONDARY_BG = "#1C1F26"
+    COLOR_TEXT = "#FAFAFA"
+    COLOR_BORDER = "#FFFFFF"
+    COLOR_TABLE_BG = "#1C1F26"
+    COLOR_TABLE_TEXT = "#FAFAFA"
+    COLOR_TABLE_GRID = "#555555"
+    PLOTLY_PAPER_BG = "#0E1117"
+    PLOTLY_PLOT_BG = "#1C1F26"
+    PLOTLY_FONT_COLOR = "#FAFAFA"
+    PLOTLY_GRID_COLOR = "#3A3F4B"
+    PLOTLY_ZERO_COLOR = "#6E7681"
+    PLOTLY_ANNOTATION_BG = "rgba(30, 33, 40, 0.75)"
+else:
+    COLOR_APP_BG = "#FAF6EC"
+    COLOR_SECONDARY_BG = "#F2ECDD"
+    COLOR_TEXT = "#000000"
+    COLOR_BORDER = "#FFFFFF"
+    COLOR_TABLE_BG = "#FFFFFF"
+    COLOR_TABLE_TEXT = "#000000"
+    COLOR_TABLE_GRID = "#000000"
+    PLOTLY_PAPER_BG = "#FAF6EC"
+    PLOTLY_PLOT_BG = "#FFFDF6"
+    PLOTLY_FONT_COLOR = "#000000"
+    PLOTLY_GRID_COLOR = "#D0D0D0"
+    PLOTLY_ZERO_COLOR = "#A0A0A0"
+    PLOTLY_ANNOTATION_BG = "rgba(255, 255, 255, 0.7)"
+
 # Pull the title up to sit ~12px below Streamlit's top header bar (default
-# header height ~3.75rem), and outline the shortlist table in black.
-st.markdown(
+# header height ~3.75rem), and give every "boxed" UI element (tables, alerts,
+# buttons, expanders, dropdowns, inputs) a flat border with square corners
+# for a consistent look across the app.
+_dark_mode_css = ""
+if dark_mode:
+    _dark_mode_css = f"""
+    .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"],
+    [data-testid="stHeader"], [data-testid="stBottomBlockContainer"] {{
+        background-color: {COLOR_APP_BG} !important;
+    }}
+    [data-testid="stSidebar"] {{
+        background-color: {COLOR_SECONDARY_BG} !important;
+    }}
+    .stApp p, .stApp span, .stApp label, .stApp div, .stApp li,
+    .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6,
+    [data-testid="stMetricValue"], [data-testid="stMetricLabel"],
+    [data-testid="stMetricDelta"] {{
+        color: {COLOR_TEXT} !important;
+    }}
+    [data-testid="stExpander"], [data-testid="stExpander"] summary,
+    .stButton > button,
+    [data-testid="stSegmentedControl"] label,
+    div[data-baseweb="select"] > div,
+    [data-testid="stTextInput"] input, [data-testid="stNumberInput"] input,
+    [data-testid="stDataFrame"] {{
+        background-color: {COLOR_SECONDARY_BG} !important;
+    }}
+    hr {{ border-color: {COLOR_BORDER} !important; }}
+    /* select/multiselect dropdown popovers render in a portal outside .stApp */
+    [data-baseweb="popover"], [data-baseweb="menu"] {{
+        background-color: {COLOR_SECONDARY_BG} !important;
+    }}
+    [data-baseweb="menu"] li, [data-baseweb="menu"] * {{
+        color: {COLOR_TEXT} !important;
+    }}
     """
+
+st.markdown(
+    f"""
     <style>
-    .block-container { padding-top: calc(3.75rem + 12px); }
-    [data-testid="stDataFrame"] { border: 1px solid #000000; }
+    .block-container {{ padding-top: calc(3.75rem + 12px); }}
+
+    [data-testid="stDataFrame"],
+    [data-testid="stAlert"],
+    [data-testid="stExpander"],
+    .stButton > button,
+    [data-testid="stButtonGroup"] button,
+    div[data-baseweb="select"] > div,
+    [data-testid="stTextInput"] input,
+    [data-testid="stNumberInput"] input {{
+        border-radius: 0 !important;
+        border: 1px solid {COLOR_BORDER} !important;
+    }}
+
+    /* Segmented control (tabs) - the "Segmented Control" testid doesn't
+       actually exist in the rendered DOM (it's stButtonGroup under the
+       hood), so target that directly for both the unselected and selected
+       segment backgrounds/text. */
+    [data-testid="stButtonGroup"] button {{
+        background-color: {COLOR_SECONDARY_BG} !important;
+    }}
+    [data-testid="stButtonGroup"] button,
+    [data-testid="stButtonGroup"] button * {{
+        color: {COLOR_TEXT} !important;
+    }}
+    {_dark_mode_css}
     </style>
     """,
     unsafe_allow_html=True,
@@ -176,7 +274,7 @@ st.caption(
     "+ Grok AI commentary, tuned for 2-3 week swing setups."
 )
 
-if st.button("🔍 Run Full Scan Now", type="primary", width="stretch"):
+if st.button("🔍 Run Full Scan Now", type="primary"):
     # The minimal "in progress" page below doesn't render the tab selector,
     # so its session_state entry gets dropped during that run - stash the
     # active tab here and restore it once the tab selector renders again
@@ -194,14 +292,17 @@ if "scan_message" in st.session_state:
 # Sidebar - controls
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    # Force readable (black) text for everything in the sidebar - the default
-    # muted caption color is low-contrast against the beige sidebar background.
+    # Force readable text for everything in the sidebar - the default muted
+    # caption color is low-contrast against the sidebar background in both
+    # the light (beige) and dark themes.
     st.markdown(
-        "<style>[data-testid='stSidebar'] * { color: #000000 !important; }</style>",
+        f"<style>[data-testid='stSidebar'] * {{ color: {COLOR_TEXT} !important; }}</style>",
         unsafe_allow_html=True,
     )
 
     st.header("Controls")
+
+    st.toggle("🌙 Dark mode", key="dark_mode")
 
     if config.AUTH_ENABLED:
         st.caption(f"Signed in as **{st.user.name or user_email}**" + (" 👑 (admin)" if is_admin else ""))
@@ -401,7 +502,84 @@ stock's own signals.
     if signals_df.empty:
         st.info("No stocks met the scoring threshold on this date.")
     else:
+        # --- Sector trend heatmap -------------------------------------------
+        # One cell per sector represented in this shortlist (not the full
+        # scan universe) - a quick read on which sectors are rotating in/out
+        # of favour, using the same sector_trend_pct fed into Score component 5.
+        st.markdown("**Sector trend snapshot**")
+        sector_trend_df = (
+            signals_df[["sector", "sector_trend_pct"]]
+            .drop_duplicates(subset="sector")
+            .sort_values("sector_trend_pct", ascending=False)
+        )
+        sector_names = sector_trend_df["sector"].tolist()
+        sector_values = (sector_trend_df["sector_trend_pct"] * 100).round(2).tolist()
+        heatmap_fig = go.Figure(data=go.Heatmap(
+            z=[sector_values],
+            x=sector_names,
+            y=[""],
+            colorscale="RdYlGn",
+            zmid=0,
+            text=[[f"{v:+.2f}%" for v in sector_values]],
+            texttemplate="%{text}",
+            hovertemplate="%{x}: %{z:+.2f}%<extra></extra>",
+            colorbar=dict(title="%", thickness=12, len=0.7),
+        ))
+        heatmap_fig.update_layout(
+            height=150,
+            margin=dict(l=10, r=10, t=10, b=30),
+            yaxis=dict(showticklabels=False),
+            paper_bgcolor=PLOTLY_PAPER_BG,
+            plot_bgcolor=PLOTLY_PLOT_BG,
+            font_color=PLOTLY_FONT_COLOR,
+        )
+        st.plotly_chart(heatmap_fig, width="stretch")
+        st.caption(
+            f"Average {config.SECTOR_TREND_LOOKBACK_DAYS}-day return of all scanned "
+            "stocks in each sector represented in this shortlist - green = sector "
+            "trending up, red = trending down (see Score component 5 above)."
+        )
+
+        # --- Day-over-day diff vs the previous retained scan ----------------
+        # SCAN_HISTORY_RETENTION_DAYS bounds how far back `available_dates`
+        # goes, so "previous" here means the next-older retained scan, not
+        # necessarily yesterday.
+        prev_scan_date = None
+        prev_signals_df = None
+        if scan_date in available_dates:
+            _scan_idx = available_dates.index(scan_date)
+            if _scan_idx + 1 < len(available_dates):
+                prev_scan_date = available_dates[_scan_idx + 1]
+                _prev_result = db_handler.get_scan_by_date(prev_scan_date)
+                if _prev_result is not None:
+                    _, _, prev_signals_df = _prev_result
+
+        if prev_signals_df is not None and not prev_signals_df.empty:
+            prev_scores = dict(zip(prev_signals_df["ticker"], prev_signals_df["score"]))
+        else:
+            prev_scores = None
+
+        def _score_delta_display(row):
+            if prev_scores is None:
+                return "—"
+            if row["ticker"] not in prev_scores:
+                return "🆕 New"
+            delta = int(row["score"]) - int(prev_scores[row["ticker"]])
+            if delta > 0:
+                return f"▲ +{delta}"
+            if delta < 0:
+                return f"▼ {delta}"
+            return "→ 0"
+
+        score_history = db_handler.get_score_history(
+            tuple(signals_df["ticker"].tolist()), scan_date
+        )
+
         display_df = signals_df.copy()
+        display_df["score_delta_display"] = display_df.apply(_score_delta_display, axis=1)
+        display_df["score_trend"] = display_df["ticker"].map(
+            lambda t: score_history.get(t, [])
+        )
         display_df["macd_hist_display"] = display_df.apply(
             lambda r: f"{r['macd_hist']:.2f} ({r['macd_hist_direction']})", axis=1
         )
@@ -417,7 +595,8 @@ stock's own signals.
             "ticker", "sector", "close", "rsi", "macd_hist_display", "nearest_fib_level",
             "nearest_fib_price", "fib_distance_pct", "week52_high",
             "pct_from_52w_high", "volume_ratio", "buy_sell_display",
-            "sector_trend_display", "score", "signals_display",
+            "sector_trend_display", "score", "score_delta_display", "score_trend",
+            "signals_display",
         ]].rename(columns={
             "ticker": "Ticker",
             "sector": "Sector",
@@ -433,6 +612,8 @@ stock's own signals.
             "buy_sell_display": "Buy % / Sell %",
             "sector_trend_display": "Sector Trend % (10D)",
             "score": "Score",
+            "score_delta_display": "Δ vs Prev",
+            "score_trend": "Score Trend",
             "signals_display": "Signals",
         })
         display_df["Fib Dist %"] = (display_df["Fib Dist %"] * 100).round(2)
@@ -447,7 +628,7 @@ stock's own signals.
         # always shown in the per-row detail panel when a row is clicked.
         compact_columns = [
             "Ticker", "Sector", "Price", "RSI", "MACD-Signal Diff (dir)",
-            "Nearest Fib", "Fib Dist %", "Score",
+            "Nearest Fib", "Fib Dist %", "Score", "Δ vs Prev", "Score Trend",
         ]
         col_check, col_download = st.columns([3, 1])
         with col_check:
@@ -471,9 +652,9 @@ stock's own signals.
         table_width = "content" if show_all_cols else "stretch"
         styled_table = (
             table_df.style.set_properties(**{
-                "background-color": "#FFFFFF",
-                "color": "#000000",
-                "border": "1px solid #000000",
+                "background-color": COLOR_TABLE_BG,
+                "color": COLOR_TABLE_TEXT,
+                "border": f"1px solid {COLOR_TABLE_GRID}",
             })
             .map(_style_rsi, subset=["RSI"])
             .map(_style_score, subset=["Score"])
@@ -482,14 +663,32 @@ stock's own signals.
         select_event = st.dataframe(
             styled_table, width=table_width, hide_index=True,
             on_select="rerun", selection_mode="single-row", key="shortlist_table",
+            column_config={
+                "Score Trend": st.column_config.LineChartColumn(
+                    "Score Trend", width="small", y_min=0, y_max=_MAX_SCORE,
+                ),
+            },
         )
         st.caption(
             f"🟩 **RSI** highlighted green when oversold (<= {config.RSI_OVERSOLD}, "
             f"possible bullish reversal) or red when overbought (>= {config.RSI_OVERBOUGHT}, "
             f"possible bearish reversal). **Score** shaded green for stronger setups "
             f"(darker = closer to {_MAX_SCORE}). **MACD-Signal Diff** colored green "
-            "(bullish) / red (bearish) by sign."
+            "(bullish) / red (bearish) by sign. **Δ vs Prev** compares this score to "
+            f"the previous retained scan{f' ({prev_scan_date})' if prev_scan_date else ''}"
+            " - 🆕 for tickers new to the shortlist. **Score Trend** sparkline shows "
+            f"score across the last {config.SCAN_HISTORY_RETENTION_DAYS} retained scans."
         )
+
+        if prev_scores is not None:
+            dropped_tickers = set(prev_scores) - set(signals_df["ticker"])
+            if dropped_tickers:
+                dropped_list = ", ".join(
+                    f"{t} ({prev_scores[t]}/100)" for t in sorted(dropped_tickers)
+                )
+                st.caption(
+                    f"📉 Dropped from the shortlist since {prev_scan_date}: {dropped_list}"
+                )
 
         if show_all_cols:
             st.caption(
@@ -651,7 +850,7 @@ with tab_chart:
                     annotation_text=f"{name}: {price:.2f}",
                     annotation_position="right",
                     annotation_font=dict(size=11, color=color),
-                    annotation_bgcolor="rgba(255,255,255,0.7)",
+                    annotation_bgcolor=PLOTLY_ANNOTATION_BG,
                     annotation_bordercolor=color,
                     annotation_borderwidth=1,
                     row=1, col=1,
@@ -665,7 +864,7 @@ with tab_chart:
                 annotation_text=f"CMP: {current_price:.2f}",
                 annotation_position="left",
                 annotation_font=dict(size=12, color="#FF00FF"),
-                annotation_bgcolor="rgba(255,255,255,0.7)",
+                annotation_bgcolor=PLOTLY_ANNOTATION_BG,
                 annotation_bordercolor="#FF00FF",
                 annotation_borderwidth=1,
                 row=1, col=1,
@@ -753,15 +952,12 @@ with tab_chart:
                 yaxis2_title="Volume",
                 yaxis3_title="MACD",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                paper_bgcolor="#FAF6EC",
-                plot_bgcolor="#FFFDF6",
-                font_color="#000000",
+                paper_bgcolor=PLOTLY_PAPER_BG,
+                plot_bgcolor=PLOTLY_PLOT_BG,
+                font_color=PLOTLY_FONT_COLOR,
             )
-            # Pure black, slightly heavier axis/tick text plus a visible grey
-            # grid - the previous warm near-black (#2B2A28) on the cream chart
-            # background didn't stand out enough.
-            fig.update_xaxes(gridcolor="#D0D0D0", zerolinecolor="#A0A0A0", tickfont=dict(color="#000000"))
-            fig.update_yaxes(gridcolor="#D0D0D0", zerolinecolor="#A0A0A0", tickfont=dict(color="#000000"))
+            fig.update_xaxes(gridcolor=PLOTLY_GRID_COLOR, zerolinecolor=PLOTLY_ZERO_COLOR, tickfont=dict(color=PLOTLY_FONT_COLOR))
+            fig.update_yaxes(gridcolor=PLOTLY_GRID_COLOR, zerolinecolor=PLOTLY_ZERO_COLOR, tickfont=dict(color=PLOTLY_FONT_COLOR))
             fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1, secondary_y=True)
             fig.update_xaxes(title_text="Date", tickformat="%d %b %Y", row=3, col=1)
             st.plotly_chart(fig, use_container_width=True)
@@ -861,7 +1057,12 @@ with tab_chart:
                     "Price": round(price, 2),
                     "Distance from CMP %": round(dist_pct, 2),
                 })
-            st.dataframe(pd.DataFrame(fib_rows), use_container_width=True, hide_index=True)
+            fib_table = pd.DataFrame(fib_rows).style.set_properties(**{
+                "background-color": COLOR_TABLE_BG,
+                "color": COLOR_TABLE_TEXT,
+                "border": f"1px solid {COLOR_TABLE_GRID}",
+            })
+            st.dataframe(fib_table, width="stretch", hide_index=True)
             st.caption(
                 "**Ratio**: the Fibonacci retracement ratio for that level (0.0 = swing "
                 "high, 1.0 = swing low). **Distance from CMP %**: positive = level is "
@@ -969,6 +1170,11 @@ if can_use_admin_tools:
                         "score": "Score", "signals": "Signals",
                     })
                     custom_table["Fib Dist %"] = (custom_table["Fib Dist %"] * 100).round(2)
+                    custom_table = custom_table.style.set_properties(**{
+                        "background-color": COLOR_TABLE_BG,
+                        "color": COLOR_TABLE_TEXT,
+                        "border": f"1px solid {COLOR_TABLE_GRID}",
+                    })
                     st.dataframe(custom_table, hide_index=True, width="stretch")
 
 # ---------------------------------------------------------------------------

@@ -298,6 +298,19 @@ def save_scan_results(shortlist_df, ai_commentary, universe_size):
                         json.dumps(row["reasons"]),
                     ),
                 )
+
+            # Keep only the SCAN_HISTORY_RETENTION_DAYS most recent scan
+            # dates - older scans (and their signals) are deleted so the
+            # day-over-day diff and score-history sparkline always have a
+            # bounded amount of data to read.
+            old_dates = [
+                r["scan_date"] for r in conn.execute(
+                    "SELECT scan_date FROM scans ORDER BY scan_date DESC"
+                ).fetchall()
+            ][config.SCAN_HISTORY_RETENTION_DAYS:]
+            for old_date in old_dates:
+                conn.execute("DELETE FROM signals WHERE scan_date = ?", (old_date,))
+                conn.execute("DELETE FROM scans WHERE scan_date = ?", (old_date,))
         return scan_date
     except _DB_ERRORS as e:
         print(f"[db_handler] Failed to save scan results: {e}")
@@ -399,6 +412,35 @@ def get_available_scan_dates():
     except _DB_ERRORS as e:
         print(f"[db_handler] Failed to fetch scan dates: {e}")
         return []
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_score_history(tickers, as_of_date):
+    """
+    Returns {ticker: [score, ...]} for each of `tickers`, oldest-first, over
+    every retained scan up to and including `as_of_date` (see
+    SCAN_HISTORY_RETENTION_DAYS) - used for the Shortlist tab's score-history
+    sparkline. Tickers with no history return an empty list.
+    """
+    if not tickers:
+        return {}
+    placeholders = ",".join("?" * len(tickers))
+    try:
+        with get_connection() as conn:
+            rows = conn.execute(
+                f"SELECT scan_date, ticker, score FROM signals "
+                f"WHERE ticker IN ({placeholders}) AND scan_date <= ? "
+                f"ORDER BY scan_date ASC",
+                (*tickers, as_of_date),
+            ).fetchall()
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to fetch score history: {e}")
+        return {ticker: [] for ticker in tickers}
+
+    history = {ticker: [] for ticker in tickers}
+    for r in rows:
+        history[r["ticker"]].append(r["score"])
+    return history
 
 
 @st.cache_data(ttl=300, show_spinner="Loading scan...")

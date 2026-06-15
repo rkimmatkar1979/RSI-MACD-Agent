@@ -307,12 +307,13 @@ with st.sidebar:
 
     st.header("Controls")
 
-    st.toggle(
-        "🌙 Dark mode",
-        value=dark_mode,
-        key="dark_mode",
-        on_change=lambda: st.session_state.update(dark_mode_pref=st.session_state["dark_mode"]),
-    )
+    if config.DARK_MODE_ENABLED:
+        st.toggle(
+            "🌙 Dark mode",
+            value=dark_mode,
+            key="dark_mode",
+            on_change=lambda: st.session_state.update(dark_mode_pref=st.session_state["dark_mode"]),
+        )
 
     if config.AUTH_ENABLED:
         st.caption(f"Signed in as **{st.user.name or user_email}**" + (" 👑 (admin)" if is_admin else ""))

@@ -30,11 +30,15 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Dark mode toggle - the widget itself lives in the sidebar (below), but its
-# session_state value is available here too (Streamlit syncs it before the
-# script runs), so the colour tokens and CSS for the whole page can be picked
-# before anything else renders.
-dark_mode = st.session_state.get("dark_mode", False)
+# Dark mode toggle - the widget itself lives in the sidebar (below). Its
+# preference is mirrored into the plain "dark_mode_pref" key (via the
+# toggle's on_change callback) rather than read directly from the widget's
+# own "dark_mode" key, because the sidebar - and therefore the toggle - is
+# never rendered during the "scan/analysis in progress" minimal pages below.
+# A widget's session_state entry is dropped if the widget isn't instantiated
+# on a run, which was silently resetting dark mode back to light once those
+# pages finished. "dark_mode_pref" isn't tied to any widget, so it survives.
+dark_mode = st.session_state.get("dark_mode_pref", False)
 
 # Colour tokens shared by the CSS below, the Shortlist/Custom Analysis tables
 # (pandas Styler), and the Plotly chart layouts - keeping a single
@@ -52,7 +56,7 @@ if dark_mode:
     PLOTLY_FONT_COLOR = "#FAFAFA"
     PLOTLY_GRID_COLOR = "#3A3F4B"
     PLOTLY_ZERO_COLOR = "#6E7681"
-    PLOTLY_ANNOTATION_BG = "rgba(30, 33, 40, 0.75)"
+    PLOTLY_ANNOTATION_BG = "rgb(30, 33, 40)"
 else:
     COLOR_APP_BG = "#FAF6EC"
     COLOR_SECONDARY_BG = "#F2ECDD"
@@ -260,7 +264,8 @@ if st.session_state.get("custom_analysis_in_progress"):
     try:
         custom_df = generate_shortlist(tickers=custom_tickers, progress_callback=_custom_progress_cb)
         progress_bar.progress(1.0, text="Fetching news and generating AI commentary...")
-        custom_commentary = get_ai_recommendations(custom_df)
+        with st.spinner("Fetching news and generating AI commentary - this can take a minute..."):
+            custom_commentary = get_ai_recommendations(custom_df)
         st.session_state["custom_analysis_result"] = (custom_tickers, custom_df, custom_commentary)
     except Exception as e:
         st.session_state["custom_analysis_result"] = (custom_tickers, pd.DataFrame(), f"Analysis failed: {e}")
@@ -302,7 +307,12 @@ with st.sidebar:
 
     st.header("Controls")
 
-    st.toggle("🌙 Dark mode", key="dark_mode")
+    st.toggle(
+        "🌙 Dark mode",
+        value=dark_mode,
+        key="dark_mode",
+        on_change=lambda: st.session_state.update(dark_mode_pref=st.session_state["dark_mode"]),
+    )
 
     if config.AUTH_ENABLED:
         st.caption(f"Signed in as **{st.user.name or user_email}**" + (" 👑 (admin)" if is_admin else ""))
@@ -339,6 +349,9 @@ with st.sidebar:
         f"Buy/Sell pressure: {config.BUY_SELL_PRESSURE_WINDOW}-day volume split by "
         "up-days vs down-days (proxy, not live order-book data)"
     )
+
+    st.markdown("---")
+    st.caption("Built by [Rishikesh Kimmatkar](https://www.linkedin.com/in/rishikesh-kimmatkar/)")
 
 # ---------------------------------------------------------------------------
 # Load latest (or selected) results

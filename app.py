@@ -27,6 +27,7 @@ from ta_engine import (
     nearest_fib_level,
 )
 
+@st.cache_data(show_spinner=False)
 def _df_to_styled_excel(df: pd.DataFrame) -> bytes:
     """Return a .xlsx file bytes with black cells and white text."""
     wb = openpyxl.Workbook()
@@ -414,8 +415,6 @@ if st.session_state.get("custom_analysis_in_progress"):
         st.session_state.pop("custom_analysis_request", None)
     st.rerun()
 
-st.caption(config.APP_TAGLINE)
-
 if "scan_message" in st.session_state:
     level, message = st.session_state.pop("scan_message")
     getattr(st, level)(message)
@@ -489,7 +488,7 @@ with st.sidebar:
     with st.expander("⚙️ Strategy Parameters", expanded=False):
         st.caption(
             f"Universe: {len(config.SCAN_UNIVERSE)} tickers "
-            f"(Nifty 100 + Gold/Silver)"
+            f"(Nifty 200 + Gold/Silver)"
         )
         st.caption(f"Fibonacci lookback: {config.FIB_LOOKBACK_DAYS} trading days (~3-4 months)")
         st.caption(f"RSI thresholds: oversold < {config.RSI_OVERSOLD}, overbought > {config.RSI_OVERBOUGHT}")
@@ -702,7 +701,7 @@ stock's own signals.
             plot_bgcolor=PLOTLY_PLOT_BG,
             font_color=PLOTLY_FONT_COLOR,
         )
-        st.plotly_chart(heatmap_fig, width="stretch")
+        st.plotly_chart(heatmap_fig, use_container_width=True)
         st.caption(
             f"Average {config.SECTOR_TREND_LOOKBACK_DAYS}-day return of all scanned "
             "stocks in each sector represented in this shortlist - green = sector "
@@ -927,12 +926,12 @@ with tab_chart:
         if st.session_state.get("chart_ticker_select") not in ticker_list:
             st.session_state["chart_ticker_select"] = ticker_list[0]
 
-        chart_ticker = st.selectbox(
-            "Select a stock to analyze", ticker_list, key="chart_ticker_select"
-        )
         st.caption(
             "👆 Click a row in the **Shortlist** tab to load that stock's "
             "chart here, or pick one manually."
+        )
+        chart_ticker = st.selectbox(
+            "Select a stock to analyze", ticker_list, key="chart_ticker_select"
         )
 
         chart_df, levels, peak, trough = get_chart_data(chart_ticker)
@@ -1165,7 +1164,7 @@ with tab_chart:
             with col9:
                 st.metric("Sector", sector)
             with col10:
-                if sector_trend_pct == sector_trend_pct:  # not NaN
+                if not pd.isna(sector_trend_pct):
                     st.metric(f"Sector Trend ({config.SECTOR_TREND_LOOKBACK_DAYS}D)", f"{sector_trend_pct * 100:+.2f}%")
                 else:
                     st.metric(f"Sector Trend ({config.SECTOR_TREND_LOOKBACK_DAYS}D)", "n/a")
@@ -1298,18 +1297,16 @@ if can_use_admin_tools:
         if past_analyses:
             st.markdown("---")
 
-            def _fmt_analysis(a_id):
-                for aid, ts, tickers in past_analyses:
-                    if aid == a_id:
-                        names = ", ".join(t.replace(".NS", "") for t in tickers[:4])
-                        suffix = f" +{len(tickers) - 4} more" if len(tickers) > 4 else ""
-                        return f"{ts} — {names}{suffix}"
-                return str(a_id)
+            _analysis_labels = {}
+            for _aid, _ts, _tickers in past_analyses:
+                _names = ", ".join(t.replace(".NS", "") for t in _tickers[:4])
+                _suffix = f" +{len(_tickers) - 4} more" if len(_tickers) > 4 else ""
+                _analysis_labels[_aid] = f"{_ts} — {_names}{_suffix}"
 
             selected_analysis_id = st.selectbox(
                 "Viewing analysis from:",
                 [a[0] for a in past_analyses],
-                format_func=_fmt_analysis,
+                format_func=lambda a_id: _analysis_labels.get(a_id, str(a_id)),
                 key="custom_analysis_select",
             )
 
@@ -1351,7 +1348,7 @@ if is_admin:
         active_count = sum(1 for u in users if u["status"] == "active")
         st.metric("Registered users", f"{active_count} / {config.AUTH_MAX_USERS}")
         admin_list = ", ".join(sorted(config.AUTH_ADMIN_EMAILS)) or "none configured"
-        st.caption(
+        st.write(
             "Users below were auto-registered on first Google sign-in "
             f"(first-come, first-served, capped at {config.AUTH_MAX_USERS}). "
             f"Admin account(s) ({admin_list}) always have access, don't count "

@@ -84,7 +84,7 @@ DATA_INTERVAL = "1d"
 
 # yfinance calls are I/O-bound; a thread pool cuts scan time dramatically
 # without overwhelming Yahoo's API.
-SCAN_MAX_WORKERS = 8
+SCAN_MAX_WORKERS = 16
 
 # ---------------------------------------------------------------------------
 # Technical Indicators
@@ -135,7 +135,7 @@ SCORE_MACD_PROXIMITY = 28
 SCORE_VOLUME = 15
 SCORE_SECTOR_TREND = 7
 
-SHORTLIST_MAX_SIZE = 8
+SHORTLIST_MAX_SIZE = 13
 SHORTLIST_MIN_SCORE = 20               # stocks below this score are excluded
 
 # ---------------------------------------------------------------------------
@@ -158,7 +158,7 @@ LLM_MODEL = _get_setting("LLM_MODEL", "llama-3.3-70b-versatile")
 LLM_TIMEOUT_SECONDS = 60
 
 # How many top-ranked shortlist entries get a full Entry/SL/TP write-up.
-AI_TOP_PICKS_COUNT = 8
+AI_TOP_PICKS_COUNT = 13
 # Recent news headlines fetched per ticker (via yfinance) for AI context.
 NEWS_HEADLINE_COUNT = 3
 # Minimum tickers required for a Custom Analysis request (keeps each LLM
@@ -235,13 +235,80 @@ NIFTY_100_TICKERS = [
     "ZYDUSLIFE.NS", "GODREJPROP.NS", "POLYCAB.NS", "ASHOKLEY.NS", "AUROPHARMA.NS",
 ]
 
+# Nifty Midcap 100 stocks (rank ~101–200 by market cap on NSE).
+# NOTE: NSE reconstitutes this index quarterly. Verify/update against the
+# official Nifty Midcap 100 fact sheet at niftyindices.com.
+NIFTY_MIDCAP_100_TICKERS = [
+    # --- Banking ---
+    "AUBANK.NS", "BANDHANBNK.NS", "BANKINDIA.NS",
+    "FEDERALBNK.NS", "IDFCFIRSTB.NS", "YESBANK.NS",
+
+    # --- Financial Services ---
+    "ABCAPITAL.NS", "ANGELONE.NS", "BSE.NS", "CAMS.NS",
+    "HDFCAMC.NS", "KFINTECH.NS", "LICHSGFIN.NS", "MANAPPURAM.NS",
+    "MCX.NS", "SBICARD.NS", "STARHEALTH.NS", "SUNDARMFIN.NS", "UTIAMC.NS",
+
+    # --- IT ---
+    "COFORGE.NS", "KPITTECH.NS", "LTTS.NS", "MAPMYINDIA.NS",
+    "MPHASIS.NS", "PERSISTENT.NS", "TATAELXSI.NS", "TATATECH.NS", "ZENSARTECH.NS",
+
+    # --- Pharma ---
+    "ALKEM.NS", "BIOCON.NS", "GLAND.NS", "GLENMARK.NS",
+    "JBCHEPHARM.NS", "LUPIN.NS", "PFIZER.NS",
+
+    # --- Healthcare ---
+    "MAXHEALTH.NS", "METROPOLIS.NS", "SYNGENE.NS",
+
+    # --- Auto & Auto Ancillaries ---
+    "EXIDEIND.NS", "MRF.NS", "SONACOMS.NS", "SUNDRMFAST.NS",
+
+    # --- FMCG ---
+    "EMAMILTD.NS", "HATSUN.NS", "UBL.NS", "ZYDUSWELL.NS",
+
+    # --- Consumer Services ---
+    "JUBLFOOD.NS", "RAYMOND.NS",
+
+    # --- Infrastructure / Capital Goods ---
+    "AIAENG.NS", "BHEL.NS", "CGPOWER.NS", "CONCOR.NS",
+    "CUMMINSIND.NS", "ELGIEQUIP.NS", "GRINDWELL.NS", "KEC.NS",
+    "RITES.NS", "THERMAX.NS", "TITAGARH.NS", "TIMKEN.NS",
+
+    # --- Cement ---
+    "ACC.NS", "DALBHARAT.NS", "JKCEMENT.NS",
+
+    # --- Consumer Durables ---
+    "ASTRAL.NS", "BATAINDIA.NS", "BLUESTARCO.NS", "CROMPTON.NS",
+    "DIXON.NS", "KAJARIACER.NS", "KANSAINER.NS", "PAGEIND.NS",
+    "TTKPRESTIG.NS", "VOLTAS.NS",
+
+    # --- Chemicals ---
+    "ATUL.NS", "DEEPAKNTR.NS", "FLUOROCHEM.NS", "PIIND.NS",
+    "SUMICHEM.NS", "VINATIORGA.NS",
+
+    # --- Oil & Gas ---
+    "GSPL.NS", "HINDPETRO.NS", "IGL.NS", "MGL.NS", "MRPL.NS", "OIL.NS",
+
+    # --- Power ---
+    "CESC.NS", "NHPC.NS", "NLCINDIA.NS", "NTPCGREEN.NS", "SJVN.NS", "TORNTPOWER.NS",
+
+    # --- Metals & Mining ---
+    "APLAPOLLO.NS", "HINDCOPPER.NS", "NATIONALUM.NS", "NMDC.NS",
+
+    # --- Realty ---
+    "OBEROIRLTY.NS", "PHOENIXLTD.NS", "PRESTIGE.NS",
+
+    # --- Telecom ---
+    "INDUSTOWER.NS", "TATACOMM.NS",
+]
+
 # TATASILV.NS has no Yahoo Finance data; SILVERBEES.NS (Nippon India Silver
 # ETF, the most liquid silver ETF on NSE) is used instead.
 GOLD_SILVER_TICKERS = ["TATAGOLD.NS", "SILVERBEES.NS"]
 
-# Full scan universe (102 tickers). Gold/Silver are always included in the
-# shortlist regardless of score (see strategy.generate_shortlist).
-SCAN_UNIVERSE = NIFTY_100_TICKERS + GOLD_SILVER_TICKERS
+# Full scan universe (202 tickers = Nifty 100 + Midcap 100 + Gold/Silver).
+# Gold/Silver are always included in the shortlist regardless of score
+# (see strategy.generate_shortlist).
+SCAN_UNIVERSE = NIFTY_100_TICKERS + NIFTY_MIDCAP_100_TICKERS + GOLD_SILVER_TICKERS
 
 # Sector classification — drives the sector-trend scoring component.
 # During a scan, all tickers in a sector have their recent returns averaged
@@ -327,4 +394,85 @@ SECTOR_MAP = {
 
     # --- Precious Metals (always-tracked commodity ETFs) ---
     "TATAGOLD.NS": "Precious Metals", "SILVERBEES.NS": "Precious Metals",
+
+    # --- Nifty Midcap 100 additions ----------------------------------------
+    # Banking
+    "AUBANK.NS": "Banking", "BANDHANBNK.NS": "Banking", "BANKINDIA.NS": "Banking",
+    "FEDERALBNK.NS": "Banking", "IDFCFIRSTB.NS": "Banking", "YESBANK.NS": "Banking",
+
+    # Financial Services
+    "ABCAPITAL.NS": "Financial Services", "ANGELONE.NS": "Financial Services",
+    "BSE.NS": "Financial Services", "CAMS.NS": "Financial Services",
+    "HDFCAMC.NS": "Financial Services", "KFINTECH.NS": "Financial Services",
+    "LICHSGFIN.NS": "Financial Services", "MANAPPURAM.NS": "Financial Services",
+    "MCX.NS": "Financial Services", "SBICARD.NS": "Financial Services",
+    "STARHEALTH.NS": "Financial Services", "SUNDARMFIN.NS": "Financial Services",
+    "UTIAMC.NS": "Financial Services",
+
+    # IT
+    "COFORGE.NS": "IT", "KPITTECH.NS": "IT", "LTTS.NS": "IT",
+    "MAPMYINDIA.NS": "IT", "MPHASIS.NS": "IT", "PERSISTENT.NS": "IT",
+    "TATAELXSI.NS": "IT", "TATATECH.NS": "IT", "ZENSARTECH.NS": "IT",
+
+    # Pharma
+    "ALKEM.NS": "Pharma", "BIOCON.NS": "Pharma", "GLAND.NS": "Pharma",
+    "GLENMARK.NS": "Pharma", "JBCHEPHARM.NS": "Pharma", "LUPIN.NS": "Pharma",
+    "PFIZER.NS": "Pharma",
+
+    # Healthcare
+    "MAXHEALTH.NS": "Healthcare", "METROPOLIS.NS": "Healthcare",
+    "SYNGENE.NS": "Healthcare",
+
+    # Auto
+    "EXIDEIND.NS": "Auto", "MRF.NS": "Auto",
+    "SONACOMS.NS": "Auto", "SUNDRMFAST.NS": "Auto",
+
+    # FMCG
+    "EMAMILTD.NS": "FMCG", "HATSUN.NS": "FMCG",
+    "UBL.NS": "FMCG", "ZYDUSWELL.NS": "FMCG",
+
+    # Consumer Services
+    "JUBLFOOD.NS": "Consumer Services", "RAYMOND.NS": "Consumer Services",
+
+    # Infrastructure / Capital Goods
+    "AIAENG.NS": "Infrastructure", "BHEL.NS": "Infrastructure",
+    "CGPOWER.NS": "Infrastructure", "CONCOR.NS": "Infrastructure",
+    "CUMMINSIND.NS": "Infrastructure", "ELGIEQUIP.NS": "Infrastructure",
+    "GRINDWELL.NS": "Infrastructure", "KEC.NS": "Infrastructure",
+    "RITES.NS": "Infrastructure", "THERMAX.NS": "Infrastructure",
+    "TITAGARH.NS": "Infrastructure", "TIMKEN.NS": "Infrastructure",
+
+    # Cement
+    "ACC.NS": "Cement", "DALBHARAT.NS": "Cement", "JKCEMENT.NS": "Cement",
+
+    # Consumer Durables
+    "ASTRAL.NS": "Consumer Durables", "BATAINDIA.NS": "Consumer Durables",
+    "BLUESTARCO.NS": "Consumer Durables", "CROMPTON.NS": "Consumer Durables",
+    "DIXON.NS": "Consumer Durables", "KAJARIACER.NS": "Consumer Durables",
+    "KANSAINER.NS": "Consumer Durables", "PAGEIND.NS": "Consumer Durables",
+    "TTKPRESTIG.NS": "Consumer Durables", "VOLTAS.NS": "Consumer Durables",
+
+    # Chemicals
+    "ATUL.NS": "Chemicals", "DEEPAKNTR.NS": "Chemicals",
+    "FLUOROCHEM.NS": "Chemicals", "PIIND.NS": "Chemicals",
+    "SUMICHEM.NS": "Chemicals", "VINATIORGA.NS": "Chemicals",
+
+    # Oil & Gas
+    "GSPL.NS": "Oil & Gas", "HINDPETRO.NS": "Oil & Gas", "IGL.NS": "Oil & Gas",
+    "MGL.NS": "Oil & Gas", "MRPL.NS": "Oil & Gas", "OIL.NS": "Oil & Gas",
+
+    # Power
+    "CESC.NS": "Power", "NHPC.NS": "Power", "NLCINDIA.NS": "Power",
+    "NTPCGREEN.NS": "Power", "SJVN.NS": "Power", "TORNTPOWER.NS": "Power",
+
+    # Metals & Mining
+    "APLAPOLLO.NS": "Metals & Mining", "HINDCOPPER.NS": "Metals & Mining",
+    "NATIONALUM.NS": "Metals & Mining", "NMDC.NS": "Metals & Mining",
+
+    # Realty
+    "OBEROIRLTY.NS": "Realty", "PHOENIXLTD.NS": "Realty",
+    "PRESTIGE.NS": "Realty",
+
+    # Telecom
+    "INDUSTOWER.NS": "Telecom", "TATACOMM.NS": "Telecom",
 }

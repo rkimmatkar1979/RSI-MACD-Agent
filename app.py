@@ -126,12 +126,7 @@ if dark_mode:
     [data-testid="stDataFrame"] {{
         background-color: {COLOR_SECONDARY_BG} !important;
     }}
-    hr {{
-        border-color: {COLOR_BORDER} !important;
-        border-top-width: 2px !important;
-        margin-top: 0.5rem !important;
-        margin-bottom: 0.5rem !important;
-    }}
+    hr {{ border-color: {COLOR_BORDER} !important; }}
     /* select/multiselect dropdown popovers render in a portal outside .stApp */
     [data-baseweb="popover"], [data-baseweb="menu"] {{
         background-color: {COLOR_SECONDARY_BG} !important;

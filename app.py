@@ -74,9 +74,9 @@ if dark_mode:
     COLOR_SECONDARY_BG = "#1C1F26"
     COLOR_TEXT = "#FAFAFA"
     COLOR_BORDER = "#FFFFFF"
-    COLOR_TABLE_BG = "#1C1F26"
-    COLOR_TABLE_TEXT = "#FAFAFA"
-    COLOR_TABLE_GRID = "#555555"
+    COLOR_TABLE_BG = "#000000"
+    COLOR_TABLE_TEXT = "#FFFFFF"
+    COLOR_TABLE_GRID = "#333333"
     PLOTLY_PAPER_BG = "#0E1117"
     PLOTLY_PLOT_BG = "#1C1F26"
     PLOTLY_FONT_COLOR = "#FAFAFA"
@@ -88,9 +88,9 @@ else:
     COLOR_SECONDARY_BG = "#F2ECDD"
     COLOR_TEXT = "#000000"
     COLOR_BORDER = "#FFFFFF"
-    COLOR_TABLE_BG = "#000000"
-    COLOR_TABLE_TEXT = "#FFFFFF"
-    COLOR_TABLE_GRID = "#333333"
+    COLOR_TABLE_BG = "#FFFFFF"
+    COLOR_TABLE_TEXT = "#000000"
+    COLOR_TABLE_GRID = "#000000"
     PLOTLY_PAPER_BG = "#FAF6EC"
     PLOTLY_PLOT_BG = "#FFFDF6"
     PLOTLY_FONT_COLOR = "#000000"
@@ -134,6 +134,14 @@ if dark_mode:
     [data-baseweb="menu"] li, [data-baseweb="menu"] * {{
         color: {COLOR_TEXT} !important;
     }}
+    [data-testid="stDataFrame"] {{
+        --gdg-bg-header: #000000;
+        --gdg-bg-cell: #000000;
+        --gdg-text-dark: #FFFFFF;
+        --gdg-text-light: #CCCCCC;
+        --gdg-text-header: #FFFFFF;
+        --gdg-border-color: #333333;
+    }}
     """
 
 st.markdown(
@@ -168,14 +176,6 @@ st.markdown(
     [data-testid="stBaseButton-primary"],
     [data-testid="stBaseButton-primary"] * {{
         color: white !important;
-    }}
-    [data-testid="stDataFrame"] {{
-        --gdg-bg-header: #000000;
-        --gdg-bg-cell: #000000;
-        --gdg-text-dark: #FFFFFF;
-        --gdg-text-light: #CCCCCC;
-        --gdg-text-header: #FFFFFF;
-        --gdg-border-color: #333333;
     }}
     [data-testid="stDownloadButton"] button {{
         background-color: #1565C0 !important;

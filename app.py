@@ -134,13 +134,17 @@ if dark_mode:
     [data-baseweb="menu"] li, [data-baseweb="menu"] * {{
         color: {COLOR_TEXT} !important;
     }}
-    [data-testid="stDataFrame"] {{
+    :root {{
         --gdg-bg-header: #000000;
+        --gdg-bg-header-has-focus: #111111;
+        --gdg-bg-header-hovered: #111111;
         --gdg-bg-cell: #000000;
+        --gdg-bg-cell-medium: #111111;
         --gdg-text-dark: #FFFFFF;
-        --gdg-text-light: #CCCCCC;
-        --gdg-text-header: #FFFFFF;
+        --gdg-text-medium: #CCCCCC;
+        --gdg-text-light: #AAAAAA;
         --gdg-border-color: #333333;
+        --gdg-horizontal-border-color: #333333;
     }}
     """
 

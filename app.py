@@ -143,6 +143,21 @@ if dark_mode:
     [data-testid="stCheckbox"] label span {{
         color: {COLOR_TEXT} !important;
     }}
+    /* Scrollbar visibility in dark mode */
+    ::-webkit-scrollbar {{
+        width: 8px;
+        height: 8px;
+    }}
+    ::-webkit-scrollbar-track {{
+        background: #1C1F26;
+    }}
+    ::-webkit-scrollbar-thumb {{
+        background: #555555;
+        border-radius: 4px;
+    }}
+    ::-webkit-scrollbar-thumb:hover {{
+        background: #888888;
+    }}
     """
 
 st.markdown(

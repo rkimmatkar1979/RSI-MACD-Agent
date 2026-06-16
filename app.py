@@ -53,7 +53,7 @@ st.set_page_config(
     page_title=config.APP_TITLE,
     layout="wide",
     page_icon=config.APP_PAGE_ICON,
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 # Dark mode toggle - the widget itself lives in the sidebar (below). Its
@@ -342,9 +342,13 @@ can_use_admin_tools = is_admin or not config.AUTH_ENABLED
 # switching tabs used to abort an in-progress scan).
 # ---------------------------------------------------------------------------
 if st.session_state.get("scan_in_progress"):
-    st.info(
-        "🔄 Running full Nifty 100 scan and requesting AI commentary - this "
-        "takes a minute or two. The page will refresh automatically when done."
+    st.title(config.APP_TITLE)
+    st.caption(config.APP_SUBTITLE)
+    st.markdown("---")
+    st.subheader("🔄 Scanning Nifty 100...")
+    st.caption(
+        "Running full scan and requesting AI commentary — this takes a minute or two. "
+        "The page will refresh automatically when done."
     )
     progress_bar = st.progress(0.0, text="Starting scan...")
 
@@ -377,9 +381,13 @@ if st.session_state.get("scan_in_progress"):
 # ---------------------------------------------------------------------------
 if st.session_state.get("custom_analysis_in_progress"):
     custom_tickers = st.session_state.get("custom_analysis_request", [])
-    st.info(
-        f"🔄 Running custom AI analysis for {len(custom_tickers)} stock(s) - "
-        "this takes a minute or so. The page will refresh automatically when done."
+    st.title(config.APP_TITLE)
+    st.caption(config.APP_SUBTITLE)
+    st.markdown("---")
+    st.subheader(f"🤖 Analysing {len(custom_tickers)} stock(s)...")
+    st.caption(
+        "Fetching technicals and generating AI commentary — this takes a minute or so. "
+        "The page will refresh automatically when done."
     )
     progress_bar = st.progress(0.0, text="Starting analysis...")
 
@@ -1424,8 +1432,3 @@ if is_admin:
 st.markdown("---")
 st.caption(config.FOOTER_ABOUT)
 st.caption(config.FOOTER_DISCLAIMER)
-st.markdown(
-    f"Built by <a href='{config.AUTHOR_LINKEDIN_URL}' "
-    f"target='_blank' style='color:#1a73e8;'>{config.AUTHOR_NAME}</a>",
-    unsafe_allow_html=True,
-)

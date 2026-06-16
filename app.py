@@ -369,7 +369,10 @@ if st.session_state.get("scan_in_progress"):
             f"Scan complete for {scan_date}: {len(shortlist)} qualifying setup(s) found.",
         )
     except Exception as e:
-        st.session_state["scan_message"] = ("error", f"Scan failed: {e}")
+        st.session_state["scan_message"] = (
+            "error",
+            f"Scan failed — please try again. If the issue persists, check your internet connection or LLM API key. (Detail: {e})",
+        )
     finally:
         st.session_state["scan_in_progress"] = False
     st.rerun()
@@ -403,7 +406,9 @@ if st.session_state.get("custom_analysis_in_progress"):
         db_handler.get_available_custom_analyses.clear()
         db_handler.get_custom_analysis_by_id.clear()
     except Exception as e:
-        st.session_state["custom_analysis_error"] = f"Analysis failed: {e}"
+        st.session_state["custom_analysis_error"] = (
+            f"Analysis failed — please try again. If the issue persists, check your internet connection or LLM API key. (Detail: {e})"
+        )
     finally:
         st.session_state["custom_analysis_in_progress"] = False
         st.session_state.pop("custom_analysis_request", None)
@@ -833,16 +838,28 @@ stock's own signals.
                 ),
             },
         )
-        st.caption(
-            f"🟩 **RSI** highlighted green when oversold (<= {config.RSI_OVERSOLD}, "
-            f"possible bullish reversal) or red when overbought (>= {config.RSI_OVERBOUGHT}, "
-            f"possible bearish reversal). **Score** shaded green for stronger setups "
-            f"(darker = closer to {_MAX_SCORE}). **MACD-Signal Diff** colored green "
-            "(bullish) / red (bearish) by sign. **Δ vs Prev** compares this score to "
-            f"the previous retained scan{f' ({prev_scan_date})' if prev_scan_date else ''}"
-            " - 🆕 for tickers new to the shortlist. **Score Trend** sparkline shows "
-            f"score across the last {config.SCAN_HISTORY_RETENTION_DAYS} retained scans."
-        )
+        with st.expander("ℹ️ Reading the table", expanded=False):
+            st.markdown(
+                f"**RSI** — 🟩 green when oversold (≤ {config.RSI_OVERSOLD}, possible bullish reversal), "
+                f"🟥 red when overbought (≥ {config.RSI_OVERBOUGHT}, possible bearish reversal).\n\n"
+                f"**Score** — shaded green for stronger setups (darker = closer to max {_MAX_SCORE}). "
+                f"**Δ vs Prev** — score change vs the previous retained scan"
+                f"{f' ({prev_scan_date})' if prev_scan_date else ''}; 🆕 = new to the shortlist. "
+                f"**Score Trend** — sparkline across the last {config.SCAN_HISTORY_RETENTION_DAYS} retained scans.\n\n"
+                "**MACD-Signal Diff (dir)** — positive = MACD above Signal line (bullish), negative = below (bearish). "
+                "**(up)**/**(down)** shows whether the histogram rose or fell vs the prior session.\n\n"
+                "**Fib Dist %** — how close price is to its nearest Fibonacci retracement level. "
+                "Click a row for the full breakdown including 52W high, volume, buy/sell pressure, and sector trend."
+            )
+            if show_all_cols:
+                st.markdown(
+                    f"**% From 52W High** — how far current price sits below the 52-week high (0% = at the high). "
+                    f"**Vol vs 20D Avg** — latest volume as a multiple of the {config.VOLUME_AVG_WINDOW}-day average "
+                    f"(≥ {config.VOLUME_SURGE_RATIO}x = surge). "
+                    f"**Buy % / Sell %** — volume-weighted proxy over the last {config.BUY_SELL_PRESSURE_WINDOW} sessions "
+                    "(not live order-book data). "
+                    "**Sector Trend % (10D)** — sector's average return over the last 10 sessions."
+                )
 
         if prev_scores is not None:
             dropped_tickers = set(prev_scores) - set(signals_df["ticker"])
@@ -850,34 +867,7 @@ stock's own signals.
                 dropped_list = ", ".join(
                     f"{t} ({prev_scores[t]}/100)" for t in sorted(dropped_tickers)
                 )
-                st.caption(
-                    f"📉 Dropped from the shortlist since {prev_scan_date}: {dropped_list}"
-                )
-
-        if show_all_cols:
-            st.caption(
-                "**MACD-Signal Diff (dir)**: positive = MACD line above Signal line "
-                "(bullish momentum), negative = MACD line below Signal line (bearish "
-                "momentum); the **(up)**/**(down)** tag shows whether this histogram "
-                "value rose or fell vs. the previous session - a quick read on current "
-                "MACD momentum direction. **% From 52W High**: how far the current "
-                "price sits below its 52-week high (0% = at the 52-week high). "
-                "**Vol vs 20D Avg**: latest session's volume as a multiple of its "
-                f"20-day average (>= {config.VOLUME_SURGE_RATIO}x counts as a volume "
-                "surge). **Buy % / Sell %**: a volume-weighted proxy for buy/sell "
-                f"pressure over the last {config.BUY_SELL_PRESSURE_WINDOW} sessions "
-                "(not live order-book data). **Sector Trend % (10D)**: this stock's "
-                "sector's average return over the last 10 sessions."
-            )
-        else:
-            st.caption(
-                "**MACD-Signal Diff (dir)**: positive = MACD line above Signal line "
-                "(bullish momentum), negative = below (bearish); **(up)**/**(down)** "
-                "shows the change vs. the previous session. **Fib Dist %**: how close "
-                "price is to its nearest Fibonacci retracement level. Click a row "
-                "below for the full breakdown (52-week high, volume, buy/sell "
-                "pressure, sector trend, and signals)."
-            )
+                st.caption(f"📉 Dropped from the shortlist since {prev_scan_date}: {dropped_list}")
 
         selected_rows = select_event["selection"]["rows"] if select_event else []
         if selected_rows:
@@ -1182,20 +1172,13 @@ with tab_chart:
 
             if is_market_open():
                 st.caption(
-                    f"**Prev Session** ({prev_date}) shows the last fully completed "
-                    "session's open/close - today's session is still live, so "
-                    "today's bar is excluded. **Buy % / Sell %** is a volume-weighted "
-                    f"proxy over the last {config.BUY_SELL_PRESSURE_WINDOW} sessions "
-                    "(NOT live order-book data - real bid/ask depth as shown on "
-                    "Zerodha/Groww requires a separate broker API)."
+                    f"**Prev Session** ({prev_date}): last completed session — today's live bar is excluded. "
+                    f"**Buy % / Sell %**: volume-weighted proxy over {config.BUY_SELL_PRESSURE_WINDOW} sessions, not live order-book data."
                 )
             else:
                 st.caption(
-                    f"**Prev Session** ({prev_date}) shows today's just-closed "
-                    "session's open/close (market is closed). **Buy % / Sell %** is "
-                    f"a volume-weighted proxy over the last {config.BUY_SELL_PRESSURE_WINDOW} "
-                    "sessions (NOT live order-book data - real bid/ask depth as shown "
-                    "on Zerodha/Groww requires a separate broker API)."
+                    f"**Prev Session** ({prev_date}): today's just-closed session. "
+                    f"**Buy % / Sell %**: volume-weighted proxy over {config.BUY_SELL_PRESSURE_WINDOW} sessions, not live order-book data."
                 )
 
             st.markdown("**MACD Pattern Analysis**")
@@ -1282,12 +1265,11 @@ with tab_chart:
 if can_use_admin_tools:
     with tab_custom:
         st.subheader("🎯 Custom Stock Analysis")
-        st.caption(
-            "Get the same AI-generated Entry / Stop-Loss / Take-Profit write-up "
-            f"for any {config.CUSTOM_ANALYSIS_MIN_TICKERS}-{config.AI_TOP_PICKS_COUNT} "
-            "stocks you pick from the scan universe - useful for checking setups "
-            "outside the daily shortlist. Each request makes one LLM call, so a "
-            f"minimum of {config.CUSTOM_ANALYSIS_MIN_TICKERS} stocks is required."
+        st.write(
+            f"Get an AI-generated Entry / Stop-Loss / Take-Profit write-up for any "
+            f"{config.CUSTOM_ANALYSIS_MIN_TICKERS}–{config.AI_TOP_PICKS_COUNT} stocks "
+            "from the scan universe — useful for setups outside the daily shortlist. "
+            f"Select at least {config.CUSTOM_ANALYSIS_MIN_TICKERS} stocks to run an analysis."
         )
 
         custom_selection = st.multiselect(
@@ -1345,41 +1327,18 @@ if can_use_admin_tools:
             """
             _result_area = st.empty()
             _result_area.markdown(_shimmer_html, unsafe_allow_html=True)
-            result = db_handler.get_custom_analysis_by_id(selected_analysis_id)
-            if result:
-                result_tickers, result_df, result_commentary = result
-                with _result_area.container():
-                    st.markdown(f"**Results for:** {', '.join(result_tickers)}")
-                    st.markdown(result_commentary if result_commentary else "_No commentary available._")
-            else:
+            try:
+                result = db_handler.get_custom_analysis_by_id(selected_analysis_id)
+                if result:
+                    result_tickers, result_df, result_commentary = result
+                    with _result_area.container():
+                        st.markdown(f"**Results for:** {', '.join(result_tickers)}")
+                        st.markdown(result_commentary if result_commentary else "_No commentary available._")
+                else:
+                    _result_area.empty()
+            except Exception:
                 _result_area.empty()
-
-                if not result_df.empty:
-                    with st.expander("📊 Underlying technical data", expanded=False):
-                        custom_table = result_df.copy()
-                        custom_table["signals"] = custom_table["reasons"].apply(
-                            lambda r: "; ".join(r) if isinstance(r, list) else (r or "-")
-                        )
-                        cols = [c for c in [
-                            "ticker", "sector", "close", "close_price", "rsi", "macd_hist",
-                            "nearest_fib_level", "fib_distance_pct", "score", "signals",
-                        ] if c in custom_table.columns]
-                        custom_table = custom_table[cols].rename(columns={
-                            "ticker": "Ticker", "sector": "Sector",
-                            "close": "CMP", "close_price": "CMP",
-                            "rsi": "RSI", "macd_hist": "MACD-Signal Diff",
-                            "nearest_fib_level": "Nearest Fib",
-                            "fib_distance_pct": "Fib Dist %",
-                            "score": "Score", "signals": "Signals",
-                        })
-                        if "Fib Dist %" in custom_table.columns:
-                            custom_table["Fib Dist %"] = (custom_table["Fib Dist %"] * 100).round(2)
-                        custom_table = custom_table.style.set_properties(**{
-                            "background-color": COLOR_TABLE_BG,
-                            "color": COLOR_TABLE_TEXT,
-                            "border": f"1px solid {COLOR_TABLE_GRID}",
-                        })
-                        st.dataframe(custom_table, hide_index=True, width="stretch")
+                st.error("Could not load analysis — please try again.")
 
 # ---------------------------------------------------------------------------
 # Tab 5: Admin - manage who can access this app (admins only)

@@ -22,18 +22,22 @@ Sections
 
 import os
 
-import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
 
 
 def _get_setting(key, default=""):
-    """Read from env (.env locally) first, then Streamlit secrets (Cloud)."""
+    """Read from env (.env locally) first, then Streamlit secrets (Cloud).
+
+    Streamlit is imported lazily so this module can be imported outside a
+    Streamlit runtime (e.g. scripts, tests, cron jobs) without crashing.
+    """
     val = os.getenv(key)
     if val is not None:
         return val
     try:
+        import streamlit as st  # noqa: PLC0415 — intentional lazy import
         return str(st.secrets[key])
     except Exception:
         return default

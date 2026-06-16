@@ -134,19 +134,6 @@ if dark_mode:
     [data-baseweb="menu"] li, [data-baseweb="menu"] * {{
         color: {COLOR_TEXT} !important;
     }}
-    /* Element toolbar - dark mode: white icons, black bg */
-    [data-testid="stElementToolbar"] {{
-        background-color: #000000 !important;
-        border: 1px solid #333333 !important;
-    }}
-    [data-testid="stElementToolbar"] button svg,
-    [data-testid="stElementToolbar"] svg {{
-        fill: #FFFFFF !important;
-        color: #FFFFFF !important;
-    }}
-    [data-testid="stElementToolbar"] button {{
-        color: #FFFFFF !important;
-    }}
     /* Checkbox widget border/background in dark mode */
     [data-testid="stCheckbox"] span,
     [data-testid="stCheckbox"] input + div {{
@@ -202,16 +189,6 @@ st.markdown(
     [data-testid="stDownloadButton"] button:hover {{
         background-color: #3E1A00 !important;
         color: white !important;
-    }}
-    /* Element toolbar (hover icons on dataframe) - light mode: black icons, white bg */
-    [data-testid="stElementToolbar"] {{
-        background-color: #FFFFFF !important;
-        border: 1px solid #DDDDDD !important;
-    }}
-    [data-testid="stElementToolbar"] button svg,
-    [data-testid="stElementToolbar"] svg {{
-        fill: #000000 !important;
-        color: #000000 !important;
     }}
     {_dark_mode_css}
     </style>

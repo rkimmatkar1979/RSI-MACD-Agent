@@ -365,6 +365,14 @@ with st.sidebar:
         on_change=lambda: st.session_state.update(dark_mode_pref=st.session_state["dark_mode"]),
     )
 
+    if dark_mode:
+        st.info(
+            "⚠️ Dark mode is currently under development. "
+            "Some UI elements may not appear as intended.",
+            icon=None,
+        )
+
+
     if config.AUTH_ENABLED:
         st.caption(f"Signed in as **{st.user.name or user_email}**" + (" 👑 (admin)" if is_admin else ""))
         if st.button("Log out", key="sidebar_logout"):

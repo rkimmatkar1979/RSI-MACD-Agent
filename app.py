@@ -138,6 +138,10 @@ st.markdown(
     [data-testid="stButtonGroup"] button * {{
         color: {COLOR_TEXT} !important;
     }}
+    [data-testid="stBaseButton-primary"],
+    [data-testid="stBaseButton-primary"] * {{
+        color: white !important;
+    }}
     {_dark_mode_css}
     </style>
     """,
@@ -279,19 +283,14 @@ st.caption(
     "+ Grok AI commentary, tuned for 2-3 week swing setups."
 )
 
-if st.button("🔍 Run Full Scan Now", type="primary"):
-    # The minimal "in progress" page below doesn't render the tab selector,
-    # so its session_state entry gets dropped during that run - stash the
-    # active tab here and restore it once the tab selector renders again
-    # (see the tabs section below), so the page doesn't snap back to the
-    # first tab once the scan completes.
-    st.session_state["_pending_active_tab"] = st.session_state.get("active_tab")
-    st.session_state["scan_in_progress"] = True
-    st.rerun()
-
 if "scan_message" in st.session_state:
     level, message = st.session_state.pop("scan_message")
     getattr(st, level)(message)
+
+# Load scan data before the sidebar so the date selector and scan-info
+# label in the sidebar can reference it.
+latest = db_handler.get_latest_scan()
+available_dates = db_handler.get_available_scan_dates()
 
 # ---------------------------------------------------------------------------
 # Sidebar - controls
@@ -322,6 +321,13 @@ with st.sidebar:
 
         st.markdown("---")
 
+    if st.button("🔍 Run Full Scan Now", type="primary", use_container_width=True):
+        st.session_state["_pending_active_tab"] = st.session_state.get("active_tab")
+        st.session_state["scan_in_progress"] = True
+        st.rerun()
+
+    st.markdown("---")
+
     try:
         if is_market_open():
             st.success("NSE market is currently OPEN")
@@ -330,26 +336,33 @@ with st.sidebar:
     except Exception:
         st.warning("Could not determine market hours.")
 
+    if available_dates:
+        st.markdown("---")
+        selected_date = st.selectbox("Viewing scan from:", available_dates, index=0, key="date_select")
+    else:
+        selected_date = None
+
     st.markdown("---")
-    st.caption(
-        f"Universe size: {len(config.SCAN_UNIVERSE)} tickers "
-        f"(Nifty 100 + Gold/Silver, always tracked)"
-    )
-    st.caption(f"Fibonacci lookback: {config.FIB_LOOKBACK_DAYS} trading days (~3-4 months)")
-    st.caption(f"RSI thresholds: oversold < {config.RSI_OVERSOLD}, overbought > {config.RSI_OVERBOUGHT}")
-    st.caption(f"MACD: {config.MACD_FAST}/{config.MACD_SLOW}/{config.MACD_SIGNAL}")
-    st.caption(
-        f"Volume surge: >= {config.VOLUME_SURGE_RATIO}x its "
-        f"{config.VOLUME_AVG_WINDOW}-day average"
-    )
-    st.caption(
-        f"Sector trend: {config.SECTOR_TREND_LOOKBACK_DAYS}-day sector average return, "
-        f">= {config.SECTOR_TREND_THRESHOLD * 100:.1f}% for a score bonus (small impact)"
-    )
-    st.caption(
-        f"Buy/Sell pressure: {config.BUY_SELL_PRESSURE_WINDOW}-day volume split by "
-        "up-days vs down-days (proxy, not live order-book data)"
-    )
+    with st.expander("⚙️ Strategy Parameters", expanded=False):
+        st.caption(
+            f"Universe: {len(config.SCAN_UNIVERSE)} tickers "
+            f"(Nifty 100 + Gold/Silver)"
+        )
+        st.caption(f"Fibonacci lookback: {config.FIB_LOOKBACK_DAYS} trading days (~3-4 months)")
+        st.caption(f"RSI thresholds: oversold < {config.RSI_OVERSOLD}, overbought > {config.RSI_OVERBOUGHT}")
+        st.caption(f"MACD: {config.MACD_FAST}/{config.MACD_SLOW}/{config.MACD_SIGNAL}")
+        st.caption(
+            f"Volume surge: >= {config.VOLUME_SURGE_RATIO}x its "
+            f"{config.VOLUME_AVG_WINDOW}-day average"
+        )
+        st.caption(
+            f"Sector trend: {config.SECTOR_TREND_LOOKBACK_DAYS}-day sector avg return, "
+            f">= {config.SECTOR_TREND_THRESHOLD * 100:.1f}% for a score bonus"
+        )
+        st.caption(
+            f"Buy/Sell pressure: {config.BUY_SELL_PRESSURE_WINDOW}-day volume split "
+            "by up-days vs down-days (proxy, not live order-book data)"
+        )
 
     st.markdown("---")
     st.markdown(
@@ -359,10 +372,8 @@ with st.sidebar:
     )
 
 # ---------------------------------------------------------------------------
-# Load latest (or selected) results
+# Resolve selected scan (data loaded above, date picked in sidebar)
 # ---------------------------------------------------------------------------
-latest = db_handler.get_latest_scan()
-
 if latest is None:
     st.warning(
         "No scans have been run yet. Click **Run Full Scan Now** in the sidebar "
@@ -372,10 +383,7 @@ if latest is None:
 
 scan_date, ai_commentary, signals_df = latest
 
-available_dates = db_handler.get_available_scan_dates()
-selected_date = st.selectbox("Viewing scan from:", available_dates, index=0)
-
-if selected_date != scan_date:
+if selected_date and selected_date != scan_date:
     result = db_handler.get_scan_by_date(selected_date)
     if result is not None:
         scan_date, ai_commentary, signals_df = result

@@ -352,7 +352,11 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.caption("Built by [Rishikesh Kimmatkar](https://www.linkedin.com/in/rishikesh-kimmatkar/)")
+    st.markdown(
+        "Built by <a href='https://www.linkedin.com/in/rishikesh-kimmatkar/' "
+        "target='_blank' style='color:#1a73e8;'>Rishikesh Kimmatkar</a>",
+        unsafe_allow_html=True,
+    )
 
 # ---------------------------------------------------------------------------
 # Load latest (or selected) results
@@ -1251,4 +1255,8 @@ st.caption(
     "advice. Always do your own research and consult a registered financial "
     "advisor before trading."
 )
-st.caption("Built by **Rishikesh Kimmatkar**")
+st.markdown(
+    "Built by <a href='https://www.linkedin.com/in/rishikesh-kimmatkar/' "
+    "target='_blank' style='color:#1a73e8;'>Rishikesh Kimmatkar</a>",
+    unsafe_allow_html=True,
+)

@@ -102,39 +102,7 @@ else:
 # header height ~3.75rem), and give every "boxed" UI element (tables, alerts,
 # buttons, expanders, dropdowns, inputs) a flat border with square corners
 # for a consistent look across the app.
-_light_mode_css = ""
 _dark_mode_css = ""
-if not dark_mode:
-    _light_mode_css = f"""
-    .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"],
-    [data-testid="stHeader"], [data-testid="stBottomBlockContainer"] {{
-        background-color: {COLOR_APP_BG} !important;
-    }}
-    [data-testid="stSidebar"] {{
-        background-color: {COLOR_SECONDARY_BG} !important;
-    }}
-    .stApp p, .stApp span, .stApp label, .stApp div, .stApp li,
-    .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6,
-    [data-testid="stMetricValue"], [data-testid="stMetricLabel"],
-    [data-testid="stMetricDelta"] {{
-        color: {COLOR_TEXT} !important;
-    }}
-    [data-testid="stExpander"], [data-testid="stExpander"] summary,
-    .stButton > button,
-    [data-testid="stSegmentedControl"] label,
-    div[data-baseweb="select"] > div,
-    [data-testid="stTextInput"] input, [data-testid="stNumberInput"] input,
-    [data-testid="stDataFrame"] {{
-        background-color: {COLOR_SECONDARY_BG} !important;
-    }}
-    hr {{ border-color: {COLOR_BORDER} !important; }}
-    [data-baseweb="popover"], [data-baseweb="menu"] {{
-        background-color: {COLOR_SECONDARY_BG} !important;
-    }}
-    [data-baseweb="menu"] li, [data-baseweb="menu"] * {{
-        color: {COLOR_TEXT} !important;
-    }}
-    """
 if dark_mode:
     _dark_mode_css = f"""
     .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"],
@@ -166,17 +134,23 @@ if dark_mode:
     [data-baseweb="menu"] li, [data-baseweb="menu"] * {{
         color: {COLOR_TEXT} !important;
     }}
-    :root {{
-        --gdg-bg-header: #000000;
-        --gdg-bg-header-has-focus: #111111;
-        --gdg-bg-header-hovered: #111111;
-        --gdg-bg-cell: #000000;
-        --gdg-bg-cell-medium: #111111;
-        --gdg-text-dark: #FFFFFF;
-        --gdg-text-medium: #CCCCCC;
-        --gdg-text-light: #AAAAAA;
-        --gdg-border-color: #333333;
-        --gdg-horizontal-border-color: #333333;
+    /* Element toolbar icons (appear on hover over dataframe/download area) */
+    [data-testid="stElementToolbar"] button svg,
+    [data-testid="stElementToolbar"] svg {{
+        fill: #FFFFFF !important;
+        color: #FFFFFF !important;
+    }}
+    [data-testid="stElementToolbar"] button {{
+        color: #FFFFFF !important;
+    }}
+    /* Checkbox widget border/background in dark mode */
+    [data-testid="stCheckbox"] span,
+    [data-testid="stCheckbox"] input + div {{
+        border-color: #FFFFFF !important;
+        background-color: #000000 !important;
+    }}
+    [data-testid="stCheckbox"] label span {{
+        color: {COLOR_TEXT} !important;
     }}
     """
 
@@ -225,7 +199,6 @@ st.markdown(
         background-color: #3E1A00 !important;
         color: white !important;
     }}
-    {_light_mode_css}
     {_dark_mode_css}
     </style>
     """,

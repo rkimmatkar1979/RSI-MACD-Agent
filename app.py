@@ -113,6 +113,7 @@ if dark_mode:
 st.markdown(
     f"""
     <style>
+    html, .main, [data-testid="stAppViewContainer"] {{ scroll-behavior: smooth; }}
     .block-container {{ padding-top: calc(3.75rem + 12px); }}
 
     [data-testid="stDataFrame"],

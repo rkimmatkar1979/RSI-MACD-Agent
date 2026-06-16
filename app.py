@@ -221,6 +221,46 @@ st.markdown(
         background-color: #3E1A00 !important;
         color: white !important;
     }}
+
+    /* ---- Mobile (≤ 640px) -------------------------------------------- */
+    @media (max-width: 640px) {{
+        /* Tighten page padding on small screens */
+        .block-container {{
+            padding-left: 0.75rem !important;
+            padding-right: 0.75rem !important;
+        }}
+        /* Stack every st.columns() layout vertically */
+        [data-testid="stHorizontalBlock"] {{
+            flex-wrap: wrap !important;
+        }}
+        [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {{
+            width: 100% !important;
+            flex: 1 1 100% !important;
+            min-width: unset !important;
+        }}
+        /* Tab bar: scroll horizontally so all tabs stay on one line */
+        [data-testid="stButtonGroup"] {{
+            display: flex !important;
+            flex-wrap: nowrap !important;
+            overflow-x: auto !important;
+            -webkit-overflow-scrolling: touch;
+        }}
+        /* Tables: horizontal scroll rather than overflow clip */
+        [data-testid="stDataFrame"] > div {{
+            overflow-x: auto !important;
+        }}
+        /* Heatmap: allow horizontal scroll on very narrow screens */
+        .stPlotlyChart > div {{
+            overflow-x: auto !important;
+        }}
+        /* Download button stretches to full width when column stacks */
+        [data-testid="stDownloadButton"] {{
+            width: 100% !important;
+        }}
+        [data-testid="stDownloadButton"] button {{
+            width: 100% !important;
+        }}
+    }}
     {_dark_mode_css}
     </style>
     """,

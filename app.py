@@ -4,6 +4,10 @@ Streamlit dashboard for the Nifty 100 Swing Trading Agent.
 Run with:  streamlit run app.py
 """
 
+import io
+
+import openpyxl
+from openpyxl.styles import Alignment, Font, PatternFill
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -22,6 +26,26 @@ from ta_engine import (
     get_reference_session,
     nearest_fib_level,
 )
+
+def _df_to_styled_excel(df: pd.DataFrame) -> bytes:
+    """Return a .xlsx file bytes with black cells and white text."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    black_fill = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
+    for col_idx, col_name in enumerate(df.columns, 1):
+        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        cell.fill = black_fill
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center")
+    for row_idx, row in enumerate(df.itertuples(index=False), 2):
+        for col_idx, value in enumerate(row, 1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell.fill = black_fill
+            cell.font = Font(color="FFFFFF")
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
 
 st.set_page_config(
     page_title="Nifty 100 Swing Trading Agent",
@@ -141,6 +165,18 @@ st.markdown(
     }}
     [data-testid="stBaseButton-primary"],
     [data-testid="stBaseButton-primary"] * {{
+        color: white !important;
+    }}
+    [data-testid="stDownloadButton"] button {{
+        background-color: #1565C0 !important;
+        color: white !important;
+        border: none !important;
+    }}
+    [data-testid="stDownloadButton"] button * {{
+        color: white !important;
+    }}
+    [data-testid="stDownloadButton"] button:hover {{
+        background-color: #3E1A00 !important;
         color: white !important;
     }}
     {_dark_mode_css}
@@ -311,13 +347,12 @@ with st.sidebar:
 
     st.header("Controls")
 
-    if config.DARK_MODE_ENABLED:
-        st.toggle(
-            "🌙 Dark mode",
-            value=dark_mode,
-            key="dark_mode",
-            on_change=lambda: st.session_state.update(dark_mode_pref=st.session_state["dark_mode"]),
-        )
+    st.toggle(
+        "🌙 Dark mode",
+        value=dark_mode,
+        key="dark_mode",
+        on_change=lambda: st.session_state.update(dark_mode_pref=st.session_state["dark_mode"]),
+    )
 
     if config.AUTH_ENABLED:
         st.caption(f"Signed in as **{st.user.name or user_email}**" + (" 👑 (admin)" if is_admin else ""))
@@ -675,10 +710,10 @@ stock's own signals.
             )
         with col_download:
             st.download_button(
-                "📥 Download CSV",
-                data=display_df.to_csv(index=False).encode("utf-8"),
-                file_name=f"nifty100_shortlist_{scan_date}.csv",
-                mime="text/csv",
+                "📥 Download Excel",
+                data=_df_to_styled_excel(display_df),
+                file_name=f"nifty100_shortlist_{scan_date}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 width="stretch",
             )
         table_df = display_df if show_all_cols else display_df[compact_columns]

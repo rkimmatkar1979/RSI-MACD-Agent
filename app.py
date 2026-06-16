@@ -39,6 +39,8 @@ def _df_to_styled_excel(df: pd.DataFrame) -> bytes:
         cell.alignment = Alignment(horizontal="center")
     for row_idx, row in enumerate(df.itertuples(index=False), 2):
         for col_idx, value in enumerate(row, 1):
+            if isinstance(value, (list, dict)):
+                value = str(value)
             cell = ws.cell(row=row_idx, column=col_idx, value=value)
             cell.fill = black_fill
             cell.font = Font(color="FFFFFF")

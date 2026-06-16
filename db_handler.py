@@ -198,6 +198,15 @@ def init_db():
                     status TEXT NOT NULL DEFAULT 'active'
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS custom_analyses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_timestamp TEXT NOT NULL,
+                    tickers TEXT NOT NULL,
+                    ai_commentary TEXT,
+                    signals_json TEXT
+                )
+            """)
 
             # Migration: add status to a table created by an older version.
             existing_user_cols = {row["name"] for row in conn.execute("PRAGMA table_info(authorized_users)")}
@@ -415,6 +424,20 @@ def get_available_scan_dates():
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def get_scan_timestamps():
+    """Returns {scan_date: scan_timestamp} for display labels in the date selector."""
+    try:
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT scan_date, scan_timestamp FROM scans ORDER BY scan_date DESC"
+            ).fetchall()
+        return {r["scan_date"]: r["scan_timestamp"] for r in rows}
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to fetch scan timestamps: {e}")
+        return {}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def get_score_history(tickers, as_of_date):
     """
     Returns {ticker: [score, ...]} for each of `tickers`, oldest-first, over
@@ -554,3 +577,63 @@ def restore_user(email):
     except _DB_ERRORS as e:
         print(f"[db_handler] Failed to restore user {email}: {e}")
         raise
+
+
+def save_custom_analysis(tickers, signals_df, ai_commentary):
+    """Persists a custom analysis run. Keeps the most recent SCAN_HISTORY_RETENTION_DAYS entries."""
+    run_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tickers_json = json.dumps(tickers)
+    signals_json = json.dumps(
+        signals_df.to_dict(orient="records") if not signals_df.empty else []
+    )
+    try:
+        with get_connection() as conn:
+            conn.execute(
+                "INSERT INTO custom_analyses (run_timestamp, tickers, ai_commentary, signals_json) "
+                "VALUES (?, ?, ?, ?)",
+                (run_timestamp, tickers_json, ai_commentary, signals_json),
+            )
+            old_ids = [
+                r["id"] for r in conn.execute(
+                    "SELECT id FROM custom_analyses ORDER BY id DESC"
+                ).fetchall()
+            ][config.SCAN_HISTORY_RETENTION_DAYS:]
+            for old_id in old_ids:
+                conn.execute("DELETE FROM custom_analyses WHERE id = ?", (old_id,))
+        return run_timestamp
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to save custom analysis: {e}")
+        raise
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_available_custom_analyses():
+    """Returns [(id, run_timestamp, tickers_list), ...] most recent first."""
+    try:
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT id, run_timestamp, tickers FROM custom_analyses ORDER BY id DESC"
+            ).fetchall()
+        return [(r["id"], r["run_timestamp"], json.loads(r["tickers"])) for r in rows]
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to fetch custom analyses: {e}")
+        return []
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_custom_analysis_by_id(analysis_id):
+    """Returns (tickers, signals_df, ai_commentary) for a saved custom analysis, or None."""
+    try:
+        with get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM custom_analyses WHERE id = ?", (analysis_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        tickers = json.loads(row["tickers"])
+        records = json.loads(row["signals_json"])
+        signals_df = pd.DataFrame(records) if records else pd.DataFrame()
+        return tickers, signals_df, row["ai_commentary"]
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to fetch custom analysis {analysis_id}: {e}")
+        return None

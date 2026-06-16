@@ -240,6 +240,7 @@ if st.session_state.get("scan_in_progress"):
         db_handler.get_latest_scan.clear()
         db_handler.get_available_scan_dates.clear()
         db_handler.get_scan_by_date.clear()
+        db_handler.get_scan_timestamps.clear()
         st.session_state["scan_message"] = (
             "success",
             f"Scan complete for {scan_date}: {len(shortlist)} qualifying setup(s) found.",
@@ -271,9 +272,11 @@ if st.session_state.get("custom_analysis_in_progress"):
         progress_bar.progress(1.0, text="Fetching news and generating AI commentary...")
         with st.spinner("Fetching news and generating AI commentary - this can take a minute..."):
             custom_commentary = get_ai_recommendations(custom_df)
-        st.session_state["custom_analysis_result"] = (custom_tickers, custom_df, custom_commentary)
+        db_handler.save_custom_analysis(custom_tickers, custom_df, custom_commentary)
+        db_handler.get_available_custom_analyses.clear()
+        db_handler.get_custom_analysis_by_id.clear()
     except Exception as e:
-        st.session_state["custom_analysis_result"] = (custom_tickers, pd.DataFrame(), f"Analysis failed: {e}")
+        st.session_state["custom_analysis_error"] = f"Analysis failed: {e}"
     finally:
         st.session_state["custom_analysis_in_progress"] = False
         st.session_state.pop("custom_analysis_request", None)
@@ -292,6 +295,7 @@ if "scan_message" in st.session_state:
 # label in the sidebar can reference it.
 latest = db_handler.get_latest_scan()
 available_dates = db_handler.get_available_scan_dates()
+scan_timestamps = db_handler.get_scan_timestamps()
 
 # ---------------------------------------------------------------------------
 # Sidebar - controls
@@ -339,7 +343,13 @@ with st.sidebar:
 
     if available_dates:
         st.markdown("---")
-        selected_date = st.selectbox("Viewing scan from:", available_dates, index=0, key="date_select")
+        selected_date = st.selectbox(
+            "Viewing scan from:",
+            available_dates,
+            index=0,
+            key="date_select",
+            format_func=lambda d: scan_timestamps.get(d, d),
+        )
     else:
         selected_date = None
 
@@ -1167,42 +1177,65 @@ if can_use_admin_tools:
                 f"({n_selected} selected so far)."
             )
         elif st.button("🤖 Get AI Analysis", type="primary", key="run_custom_analysis"):
-            # See the comment on the "Run Full Scan Now" button - stash the
-            # active tab so it's restored (instead of snapping back to the
-            # first tab) once the analysis completes.
             st.session_state["_pending_active_tab"] = st.session_state.get("active_tab")
             st.session_state["custom_analysis_in_progress"] = True
             st.session_state["custom_analysis_request"] = custom_selection
             st.rerun()
 
-        if "custom_analysis_result" in st.session_state:
-            result_tickers, result_df, result_commentary = st.session_state["custom_analysis_result"]
-            st.markdown("---")
-            st.markdown(f"**Results for:** {', '.join(result_tickers)}")
-            st.markdown(result_commentary if result_commentary else "_No commentary available._")
+        if "custom_analysis_error" in st.session_state:
+            st.error(st.session_state.pop("custom_analysis_error"))
 
-            if not result_df.empty:
-                with st.expander("📊 Underlying technical data", expanded=False):
-                    custom_table = result_df.copy()
-                    custom_table["signals"] = custom_table["reasons"].apply(
-                        lambda r: "; ".join(r) if r else "-"
-                    )
-                    custom_table = custom_table[[
-                        "ticker", "sector", "close", "rsi", "macd_hist",
-                        "nearest_fib_level", "fib_distance_pct", "score", "signals",
-                    ]].rename(columns={
-                        "ticker": "Ticker", "sector": "Sector", "close": "CMP",
-                        "rsi": "RSI", "macd_hist": "MACD-Signal Diff",
-                        "nearest_fib_level": "Nearest Fib", "fib_distance_pct": "Fib Dist %",
-                        "score": "Score", "signals": "Signals",
-                    })
-                    custom_table["Fib Dist %"] = (custom_table["Fib Dist %"] * 100).round(2)
-                    custom_table = custom_table.style.set_properties(**{
-                        "background-color": COLOR_TABLE_BG,
-                        "color": COLOR_TABLE_TEXT,
-                        "border": f"1px solid {COLOR_TABLE_GRID}",
-                    })
-                    st.dataframe(custom_table, hide_index=True, width="stretch")
+        past_analyses = db_handler.get_available_custom_analyses()
+        if past_analyses:
+            st.markdown("---")
+
+            def _fmt_analysis(a_id):
+                for aid, ts, tickers in past_analyses:
+                    if aid == a_id:
+                        names = ", ".join(t.replace(".NS", "") for t in tickers[:4])
+                        suffix = f" +{len(tickers) - 4} more" if len(tickers) > 4 else ""
+                        return f"{ts} — {names}{suffix}"
+                return str(a_id)
+
+            selected_analysis_id = st.selectbox(
+                "Viewing analysis from:",
+                [a[0] for a in past_analyses],
+                format_func=_fmt_analysis,
+                key="custom_analysis_select",
+            )
+
+            result = db_handler.get_custom_analysis_by_id(selected_analysis_id)
+            if result:
+                result_tickers, result_df, result_commentary = result
+                st.markdown(f"**Results for:** {', '.join(result_tickers)}")
+                st.markdown(result_commentary if result_commentary else "_No commentary available._")
+
+                if not result_df.empty:
+                    with st.expander("📊 Underlying technical data", expanded=False):
+                        custom_table = result_df.copy()
+                        custom_table["signals"] = custom_table["reasons"].apply(
+                            lambda r: "; ".join(r) if isinstance(r, list) else (r or "-")
+                        )
+                        cols = [c for c in [
+                            "ticker", "sector", "close", "close_price", "rsi", "macd_hist",
+                            "nearest_fib_level", "fib_distance_pct", "score", "signals",
+                        ] if c in custom_table.columns]
+                        custom_table = custom_table[cols].rename(columns={
+                            "ticker": "Ticker", "sector": "Sector",
+                            "close": "CMP", "close_price": "CMP",
+                            "rsi": "RSI", "macd_hist": "MACD-Signal Diff",
+                            "nearest_fib_level": "Nearest Fib",
+                            "fib_distance_pct": "Fib Dist %",
+                            "score": "Score", "signals": "Signals",
+                        })
+                        if "Fib Dist %" in custom_table.columns:
+                            custom_table["Fib Dist %"] = (custom_table["Fib Dist %"] * 100).round(2)
+                        custom_table = custom_table.style.set_properties(**{
+                            "background-color": COLOR_TABLE_BG,
+                            "color": COLOR_TABLE_TEXT,
+                            "border": f"1px solid {COLOR_TABLE_GRID}",
+                        })
+                        st.dataframe(custom_table, hide_index=True, width="stretch")
 
 # ---------------------------------------------------------------------------
 # Tab 5: Admin - manage who can access this app (admins only)

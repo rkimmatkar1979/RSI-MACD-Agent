@@ -50,9 +50,9 @@ def _df_to_styled_excel(df: pd.DataFrame) -> bytes:
 
 
 st.set_page_config(
-    page_title="Nifty 100 Swing Trading Agent",
+    page_title=config.APP_TITLE,
     layout="wide",
-    page_icon="📈",
+    page_icon=config.APP_PAGE_ICON,
     initial_sidebar_state="collapsed",
 )
 
@@ -126,7 +126,12 @@ if dark_mode:
     [data-testid="stDataFrame"] {{
         background-color: {COLOR_SECONDARY_BG} !important;
     }}
-    hr {{ border-color: {COLOR_BORDER} !important; }}
+    hr {{
+        border-color: {COLOR_BORDER} !important;
+        border-top-width: 2px !important;
+        margin-top: 0.25rem !important;
+        margin-bottom: 0.25rem !important;
+    }}
     /* select/multiselect dropdown popovers render in a portal outside .stApp */
     [data-baseweb="popover"], [data-baseweb="menu"] {{
         background-color: {COLOR_SECONDARY_BG} !important;
@@ -165,6 +170,17 @@ st.markdown(
     <style>
     *, html {{ scroll-behavior: smooth; }}
     .block-container {{ padding-top: calc(3.75rem + 12px); }}
+    @keyframes shimmer {{
+        0% {{ background-position: -1000px 0; }}
+        100% {{ background-position: 1000px 0; }}
+    }}
+    .shimmer-line {{
+        background: linear-gradient(90deg, {COLOR_SECONDARY_BG} 25%, {COLOR_TABLE_GRID} 50%, {COLOR_SECONDARY_BG} 75%);
+        background-size: 1000px 100%;
+        animation: shimmer 1.5s infinite linear;
+        border-radius: 3px;
+        margin-bottom: 10px;
+    }}
 
     [data-testid="stDataFrame"],
     [data-testid="stAlert"],
@@ -223,7 +239,8 @@ def _ensure_db_initialized():
 
 _ensure_db_initialized()
 
-st.title("📈 Nifty 100 Swing Trading Agent")
+st.title(config.APP_TITLE)
+st.caption(config.APP_SUBTITLE)
 
 # ---------------------------------------------------------------------------
 # Authentication - Google sign-in via Streamlit's built-in auth (requires
@@ -344,10 +361,7 @@ if st.session_state.get("custom_analysis_in_progress"):
         st.session_state.pop("custom_analysis_request", None)
     st.rerun()
 
-st.caption(
-    "Mathematical screening (RSI, MACD, Fibonacci retracements) "
-    "+ Grok AI commentary, tuned for 2-3 week swing setups."
-)
+st.caption(config.APP_TAGLINE)
 
 if "scan_message" in st.session_state:
     level, message = st.session_state.pop("scan_message")
@@ -381,11 +395,7 @@ with st.sidebar:
     )
 
     if dark_mode:
-        st.info(
-            "⚠️ Dark mode is currently under development. "
-            "Some UI elements may not appear as intended.",
-            icon=None,
-        )
+        st.info(config.DARK_MODE_NOTICE, icon=None)
 
 
     if config.AUTH_ENABLED:
@@ -446,8 +456,8 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown(
-        "Built by <a href='https://www.linkedin.com/in/rishikesh-kimmatkar/' "
-        "target='_blank' style='color:#1a73e8;'>Rishikesh Kimmatkar</a>",
+        f"Built by <a href='{config.AUTHOR_LINKEDIN_URL}' "
+        f"target='_blank' style='color:#1a73e8;'>{config.AUTHOR_NAME}</a>",
         unsafe_allow_html=True,
     )
 
@@ -1273,11 +1283,28 @@ if can_use_admin_tools:
                 key="custom_analysis_select",
             )
 
+            _shimmer_html = """
+                <div style="padding:4px 0">
+                    <div class="shimmer-line" style="height:18px;width:45%;"></div>
+                    <div class="shimmer-line" style="height:13px;width:100%;"></div>
+                    <div class="shimmer-line" style="height:13px;width:96%;"></div>
+                    <div class="shimmer-line" style="height:13px;width:89%;"></div>
+                    <div class="shimmer-line" style="height:13px;width:93%;"></div>
+                    <div class="shimmer-line" style="height:13px;width:72%;"></div>
+                    <div class="shimmer-line" style="height:13px;width:98%;"></div>
+                    <div class="shimmer-line" style="height:13px;width:81%;"></div>
+                </div>
+            """
+            _result_area = st.empty()
+            _result_area.markdown(_shimmer_html, unsafe_allow_html=True)
             result = db_handler.get_custom_analysis_by_id(selected_analysis_id)
             if result:
                 result_tickers, result_df, result_commentary = result
-                st.markdown(f"**Results for:** {', '.join(result_tickers)}")
-                st.markdown(result_commentary if result_commentary else "_No commentary available._")
+                with _result_area.container():
+                    st.markdown(f"**Results for:** {', '.join(result_tickers)}")
+                    st.markdown(result_commentary if result_commentary else "_No commentary available._")
+            else:
+                _result_area.empty()
 
                 if not result_df.empty:
                     with st.expander("📊 Underlying technical data", expanded=False):
@@ -1355,19 +1382,10 @@ if is_admin:
 # Footer
 # ---------------------------------------------------------------------------
 st.markdown("---")
-st.caption(
-    "📈 **Nifty 100 Swing Trading Agent** — mathematical screening (RSI, MACD, "
-    "Fibonacci retracements) plus AI-generated commentary, for 2-3 week swing "
-    "setups on NSE-listed stocks and Gold/Silver ETFs. Price data via Yahoo "
-    "Finance (yfinance); AI commentary via the configured LLM API."
-)
-st.caption(
-    "⚠️ For educational and personal use only — this is **not** investment "
-    "advice. Always do your own research and consult a registered financial "
-    "advisor before trading."
-)
+st.caption(config.FOOTER_ABOUT)
+st.caption(config.FOOTER_DISCLAIMER)
 st.markdown(
-    "Built by <a href='https://www.linkedin.com/in/rishikesh-kimmatkar/' "
-    "target='_blank' style='color:#1a73e8;'>Rishikesh Kimmatkar</a>",
+    f"Built by <a href='{config.AUTHOR_LINKEDIN_URL}' "
+    f"target='_blank' style='color:#1a73e8;'>{config.AUTHOR_NAME}</a>",
     unsafe_allow_html=True,
 )

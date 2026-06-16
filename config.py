@@ -4,6 +4,20 @@ Central configuration for the Nifty 100 Swing Trading Agent.
 All tunable parameters live here so the rest of the codebase stays
 declarative. Values can be overridden via environment variables / a
 local .env file (see .env.example).
+
+Sections
+--------
+  App / UI                  — branding, titles, footer text, dark mode
+  Data & Scan               — yfinance settings, concurrency
+  Technical Indicators      — RSI, MACD, Fibonacci, Volume, Sector Trend
+  Shortlist Tab             — scoring weights, shortlist size/threshold
+  Chart Analysis Tab        — chart display window
+  AI Commentary &           — LLM endpoint, model, pick counts
+    Custom Analysis Tab
+  Market Hours              — NSE open/close times (informational)
+  Database                  — local SQLite + optional Turso (cloud)
+  Authentication (Admin)    — Google OAuth, user caps, admin emails
+  Scan Universe             — Nifty 100 + Gold/Silver tickers, sector map
 """
 
 import os
@@ -15,11 +29,7 @@ load_dotenv()
 
 
 def _get_setting(key, default=""):
-    """Read a setting from the environment (.env locally) first, falling
-    back to Streamlit secrets (.streamlit/secrets.toml, or the Cloud
-    Secrets box) - Streamlit Community Cloud doesn't reliably expose
-    root-level secrets as environment variables, but st.secrets always
-    has them."""
+    """Read from env (.env locally) first, then Streamlit secrets (Cloud)."""
     val = os.getenv(key)
     if val is not None:
         return val
@@ -30,101 +40,90 @@ def _get_setting(key, default=""):
 
 
 # ---------------------------------------------------------------------------
-# LLM API settings - any OpenAI-compatible chat completions endpoint works
-# (Groq, xAI, OpenRouter, GitHub Models, ...) since ai_analyst.py uses the
-# standard {"model", "messages", "temperature"} request shape and reads
-# choices[0].message.content from the response.
+# App / UI
 # ---------------------------------------------------------------------------
-LLM_API_KEY = _get_setting("LLM_API_KEY", "")
-LLM_API_URL = _get_setting("LLM_API_URL", "https://api.groq.com/openai/v1/chat/completions")
-# Default model runs on Groq's free tier - see
-# https://console.groq.com/docs/models for the current list of model ids.
-LLM_MODEL = _get_setting("LLM_MODEL", "llama-3.3-70b-versatile")
-LLM_TIMEOUT_SECONDS = 60
+APP_TITLE = "SwingEdge"
+APP_PAGE_ICON = "📈"
+APP_SUBTITLE = "Nifty 100 Swing Trading Agent"
+APP_TAGLINE = (
+    "Mathematical screening (RSI, MACD, Fibonacci retracements) "
+    "+ Grok AI commentary, tuned for 2-3 week swing setups."
+)
+
+# Set to True to show the dark mode toggle in the sidebar.
+DARK_MODE_ENABLED = True
+DARK_MODE_NOTICE = (
+    "⚠️ Dark mode is currently under development. "
+    "Some UI elements may not appear as intended."
+)
+
+AUTHOR_NAME = "Rishikesh Kimmatkar"
+AUTHOR_LINKEDIN_URL = "https://www.linkedin.com/in/rishikesh-kimmatkar/"
+FOOTER_ABOUT = (
+    f"📈 **{APP_SUBTITLE}** — mathematical screening (RSI, MACD, "
+    "Fibonacci retracements) plus AI-generated commentary, for 2-3 week swing "
+    "setups on NSE-listed stocks and Gold/Silver ETFs. Price data via Yahoo "
+    "Finance (yfinance); AI commentary via the configured LLM API."
+)
+FOOTER_DISCLAIMER = (
+    "⚠️ For educational and personal use only — this is **not** investment "
+    "advice. Always do your own research and consult a registered financial "
+    "advisor before trading."
+)
 
 # ---------------------------------------------------------------------------
-# Data settings (yfinance)
+# Data & Scan
 # ---------------------------------------------------------------------------
-# Daily candles are used throughout - appropriate for a 2-3 week swing
-# trading horizon (intraday noise is irrelevant at this timeframe).
+# Daily candles throughout — appropriate for a 2-3 week swing trading horizon.
 DATA_PERIOD = "1y"
 DATA_INTERVAL = "1d"
 
-# Number of tickers fetched/analyzed concurrently during a scan. yfinance
-# calls are I/O-bound, so a thread pool here cuts scan time dramatically
+# yfinance calls are I/O-bound; a thread pool cuts scan time dramatically
 # without overwhelming Yahoo's API.
 SCAN_MAX_WORKERS = 8
 
 # ---------------------------------------------------------------------------
-# Technical indicator parameters
+# Technical Indicators
 # ---------------------------------------------------------------------------
+
+# RSI
 RSI_PERIOD = 14
 RSI_OVERSOLD = 35
 RSI_OVERBOUGHT = 65
 
+# MACD
 MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
-
-# The MACD histogram is considered "near a crossover" when its absolute
-# value has shrunk below this fraction of its own recent (20-bar) average
-# magnitude AND it is still shrinking versus the prior bar.
+# Histogram is "near a crossover" when its absolute value has shrunk below
+# this fraction of its own recent (20-bar) average AND is still shrinking.
 MACD_CROSSOVER_PROXIMITY_FACTOR = 0.15
 
-# ---------------------------------------------------------------------------
-# Chart display
-# ---------------------------------------------------------------------------
-# The Chart Analysis tab plots only the most recent CHART_DISPLAY_MONTHS of
-# candles/volume/MACD - separate from FIB_LOOKBACK_DAYS below, which still
-# uses its full window to compute Fibonacci levels. Those levels (and the
-# swing high/low, if within this window) are drawn across this shorter view.
-CHART_DISPLAY_MONTHS = 3
-
-# ---------------------------------------------------------------------------
-# Fibonacci retracement parameters
-# ---------------------------------------------------------------------------
+# Fibonacci retracement
 # 90 trading days (~4.5 months) gives a swing-relevant peak/trough window.
 FIB_LOOKBACK_DAYS = 90
 FIB_LEVELS = [0.236, 0.382, 0.5, 0.618]
-# 50% and 61.8% are weighted higher in the scoring model.
-FIB_KEY_LEVELS = [0.5, 0.618]
-# Price must be within this fraction of a level to count as "at" that level.
-FIB_PROXIMITY_PCT = 0.01  # 1%
+FIB_KEY_LEVELS = [0.5, 0.618]          # weighted higher in scoring
+FIB_PROXIMITY_PCT = 0.01               # price must be within 1% of a level
+
+# Volume
+VOLUME_AVG_WINDOW = 20                 # rolling window (trading days)
+VOLUME_SURGE_RATIO = 1.5               # >= this multiple counts as a surge
+
+# Buy / Sell pressure (volume-weighted proxy — not live order-book data)
+BUY_SELL_PRESSURE_WINDOW = 20          # sessions to look back
+
+# Sector trend
+SECTOR_TREND_LOOKBACK_DAYS = 10        # ~2 trading weeks
+SECTOR_TREND_THRESHOLD = 0.015         # 1.5% minimum move for bonus to apply
 
 # ---------------------------------------------------------------------------
-# Volume parameters
+# Shortlist Tab
 # ---------------------------------------------------------------------------
-VOLUME_AVG_WINDOW = 20  # rolling window (trading days) for the average-volume baseline
-# Latest session volume >= this multiple of its rolling average counts as a
-# "surge", confirming the move with above-average participation.
-VOLUME_SURGE_RATIO = 1.5
-
-# ---------------------------------------------------------------------------
-# Buy/sell pressure parameters
-# ---------------------------------------------------------------------------
-# Proxy for order flow (NSE order-book depth isn't available via yfinance):
-# over this many sessions, the share of total volume that traded on "buy"
-# days (close >= open) vs "sell" days (close < open).
-BUY_SELL_PRESSURE_WINDOW = 20
-
-# ---------------------------------------------------------------------------
-# Sector-trend parameters
-# ---------------------------------------------------------------------------
-# How far back (trading days) to measure each stock's own return when
-# aggregating it into its sector's average "current trend" - roughly 2
-# trading weeks, to capture recent industry-wide swings.
-SECTOR_TREND_LOOKBACK_DAYS = 10
-# A sector's average return over that window must clear this magnitude
-# (either direction) for the sector-trend score bonus to apply.
-SECTOR_TREND_THRESHOLD = 0.015  # 1.5%
-
-# ---------------------------------------------------------------------------
-# Scoring weights / shortlist size
-# ---------------------------------------------------------------------------
-# Weights sum to 100 across the best-case combination (key Fib level + RSI
-# extreme + MACD crossover proximity + volume surge + aligned sector trend
-# = 30+20+28+15+7 = 100). Fibonacci and MACD are the primary drivers of the
-# score; sector trend is a small/secondary factor by design.
+# Score weights sum to 100 for the best-case combination:
+#   key Fib (30) + RSI extreme (20) + MACD proximity (28)
+#   + volume surge (15) + sector trend (7) = 100
+# Fibonacci and MACD are primary drivers; sector trend is secondary by design.
 SCORE_FIB_KEY_LEVEL = 30
 SCORE_FIB_OTHER_LEVEL = 15
 SCORE_RSI_EXTREME = 20
@@ -133,27 +132,37 @@ SCORE_VOLUME = 15
 SCORE_SECTOR_TREND = 7
 
 SHORTLIST_MAX_SIZE = 8
-SHORTLIST_MIN_SCORE = 20  # ignore stocks with a weak/no setup
+SHORTLIST_MIN_SCORE = 20               # stocks below this score are excluded
 
 # ---------------------------------------------------------------------------
-# AI analyst settings
+# Chart Analysis Tab
 # ---------------------------------------------------------------------------
-# How many top-ranked shortlist entries get a full Entry/Stop-Loss/Take-Profit
-# write-up (and a news headline lookup) from the AI analyst.
+# Plots only the most recent N months of candles/volume/MACD. Fibonacci
+# levels are still computed from the full FIB_LOOKBACK_DAYS window and
+# drawn across this shorter view.
+CHART_DISPLAY_MONTHS = 3
+
+# ---------------------------------------------------------------------------
+# AI Commentary & Custom Analysis Tab
+# ---------------------------------------------------------------------------
+# Any OpenAI-compatible chat completions endpoint works (Groq, xAI,
+# OpenRouter, GitHub Models, ...) — ai_analyst.py uses the standard
+# {"model", "messages", "temperature"} shape.
+LLM_API_KEY = _get_setting("LLM_API_KEY", "")
+LLM_API_URL = _get_setting("LLM_API_URL", "https://api.groq.com/openai/v1/chat/completions")
+LLM_MODEL = _get_setting("LLM_MODEL", "llama-3.3-70b-versatile")
+LLM_TIMEOUT_SECONDS = 60
+
+# How many top-ranked shortlist entries get a full Entry/SL/TP write-up.
 AI_TOP_PICKS_COUNT = 8
 # Recent news headlines fetched per ticker (via yfinance) for AI context.
 NEWS_HEADLINE_COUNT = 3
-
-# Minimum number of tickers that must be selected on the Custom Analysis tab
-# before an AI write-up can be requested - keeps each on-demand LLM call
-# covering enough stocks to be worth the request. The multiselect there is
-# capped at AI_TOP_PICKS_COUNT so every selected ticker gets a write-up with
-# no truncation.
+# Minimum tickers required for a Custom Analysis request (keeps each LLM
+# call covering enough stocks to be worthwhile). Capped at AI_TOP_PICKS_COUNT.
 CUSTOM_ANALYSIS_MIN_TICKERS = 5
 
 # ---------------------------------------------------------------------------
-# Market hours (informational only - the agent is run on demand, not on
-# an automatic background schedule)
+# Market Hours  (informational — agent runs on demand, not on a schedule)
 # ---------------------------------------------------------------------------
 MARKET_TIMEZONE = "Asia/Kolkata"
 MARKET_OPEN_TIME = "09:15"
@@ -164,52 +173,38 @@ MARKET_CLOSE_TIME = "15:30"
 # ---------------------------------------------------------------------------
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trading_agent.db")
 
-# How many of the most recent scan dates (rows in `scans`/`signals`) to keep -
-# older ones are deleted in save_scan_results(). Bounds DB growth while still
-# giving the day-over-day diff and score-history sparkline on the Shortlist
-# tab a few prior sessions to compare against.
+# Retain only the N most recent scan dates; older rows are pruned in
+# save_scan_results(). Bounds DB growth while still giving the day-over-day
+# diff and score-history sparkline a few sessions to compare against.
 SCAN_HISTORY_RETENTION_DAYS = 5
 
-# Dark mode toggle (sidebar) - set to True to re-enable once the
-# st.dataframe header/index styling is sorted out.
-DARK_MODE_ENABLED = False
-
-# Optional hosted Turso (libSQL) database - if both are set, db_handler uses
-# Turso instead of the local SQLite file, so data survives Streamlit Cloud
-# restarts/redeploys. Leave unset for local SQLite (the default).
+# Optional Turso (libSQL) cloud DB — if both vars are set, db_handler uses
+# Turso instead of the local SQLite file so data survives Cloud restarts.
 TURSO_DATABASE_URL = _get_setting("TURSO_DATABASE_URL", "")
 TURSO_AUTH_TOKEN = _get_setting("TURSO_AUTH_TOKEN", "")
 
 # ---------------------------------------------------------------------------
-# Authentication (Google OAuth via Streamlit's built-in st.login/st.user -
-# requires Authlib and a [auth] / [auth.google] section in
-# .streamlit/secrets.toml, see .streamlit/secrets.toml.example)
+# Authentication  (Admin Tab)
 # ---------------------------------------------------------------------------
-# Master switch for Google sign-in. When False, the app skips the login
-# screen and per-user limits entirely (everyone gets full access, no Admin
-# tab) - useful while Google OAuth isn't set up or for a private deployment.
+# Master switch for Google OAuth (requires Authlib + .streamlit/secrets.toml).
+# When False the app skips login and per-user limits entirely.
 AUTH_ENABLED = _get_setting("AUTH_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
 
-# Maximum number of distinct Google accounts that may use this app, on a
-# first-come-first-served basis (db_handler.authorized_users tracks who has
-# already logged in). Admins (below) are exempt from this cap and can free up
-# slots via the in-app Admin tab.
+# First-come-first-served cap on Google accounts. Admins are exempt and can
+# free up slots from the Admin tab.
 AUTH_MAX_USERS = int(_get_setting("AUTH_MAX_USERS", "10"))
 
-# Comma-separated Google account emails (case-insensitive) that always have
-# access regardless of AUTH_MAX_USERS, and see the Admin tab to manage the
-# authorized-user list.
+# Comma-separated emails (case-insensitive) that always have access and see
+# the Admin tab. Managed via AUTH_ADMIN_EMAILS in .env / Streamlit secrets.
 AUTH_ADMIN_EMAILS = {
     e.strip().lower() for e in _get_setting("AUTH_ADMIN_EMAILS", "").split(",") if e.strip()
 }
 
 # ---------------------------------------------------------------------------
-# Nifty 100 universe (NSE symbols, '.NS' suffix for yfinance)
-#
-# NOTE: NSE Indices reconstitutes the Nifty 100 semi-annually (March and
-# September). This list reflects a recent representative composition -
-# verify/update it periodically against the official Nifty 100 list.
+# Scan Universe
 # ---------------------------------------------------------------------------
+# NOTE: NSE Indices reconstitutes the Nifty 100 semi-annually (March and
+# September). Verify/update this list periodically against the official list.
 NIFTY_100_TICKERS = [
     # --- Nifty 50 ---
     "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS",
@@ -236,27 +231,17 @@ NIFTY_100_TICKERS = [
     "ZYDUSLIFE.NS", "GODREJPROP.NS", "POLYCAB.NS", "ASHOKLEY.NS", "AUROPHARMA.NS",
 ]
 
-# ---------------------------------------------------------------------------
-# Gold/Silver - permanently tracked alongside the Nifty 100 universe
-# ---------------------------------------------------------------------------
-# Note: TATASILV.NS has no data on Yahoo Finance (yfinance source) as of
-# writing, so SILVERBEES.NS (Nippon India Silver ETF, the most liquid silver
-# ETF on NSE) is used instead.
+# TATASILV.NS has no Yahoo Finance data; SILVERBEES.NS (Nippon India Silver
+# ETF, the most liquid silver ETF on NSE) is used instead.
 GOLD_SILVER_TICKERS = ["TATAGOLD.NS", "SILVERBEES.NS"]
 
-# Full scan universe (102 tickers): every scan covers the Nifty 100 plus
-# Gold/Silver, and Gold/Silver are always included in the shortlist
-# regardless of score (see strategy.generate_shortlist).
+# Full scan universe (102 tickers). Gold/Silver are always included in the
+# shortlist regardless of score (see strategy.generate_shortlist).
 SCAN_UNIVERSE = NIFTY_100_TICKERS + GOLD_SILVER_TICKERS
 
-# ---------------------------------------------------------------------------
-# Sector classification (drives the sector-trend scoring component)
-#
-# Each ticker is mapped to a broad NSE sector grouping. During a scan, all
-# tickers sharing a sector have their recent returns averaged into that
-# sector's "current trend" - a small additional signal (see
-# SCORE_SECTOR_TREND) on top of each stock's own technicals.
-# ---------------------------------------------------------------------------
+# Sector classification — drives the sector-trend scoring component.
+# During a scan, all tickers in a sector have their recent returns averaged
+# into that sector's "current trend" (see SCORE_SECTOR_TREND).
 SECTOR_MAP = {
     # --- Banking ---
     "HDFCBANK.NS": "Banking", "ICICIBANK.NS": "Banking", "SBIN.NS": "Banking",

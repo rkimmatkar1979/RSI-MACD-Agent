@@ -172,7 +172,7 @@ SCAN_HISTORY_RETENTION_DAYS = 5
 
 # Dark mode toggle (sidebar) - set to True to re-enable once the
 # st.dataframe header/index styling is sorted out.
-DARK_MODE_ENABLED = True
+DARK_MODE_ENABLED = False
 
 # Optional hosted Turso (libSQL) database - if both are set, db_handler uses
 # Turso instead of the local SQLite file, so data survives Streamlit Cloud

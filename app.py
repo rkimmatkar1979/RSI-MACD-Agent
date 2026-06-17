@@ -6,6 +6,7 @@ Run with:  streamlit run app.py
 
 import html
 import io
+import re
 
 import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -16,6 +17,7 @@ from plotly.subplots import make_subplots
 
 import config
 import db_handler
+import fundamentals
 from ai_analyst import get_ai_recommendations
 from scheduler import is_market_open, run_pipeline
 from strategy import generate_shortlist
@@ -965,6 +967,120 @@ stock's own signals.
             st.caption("👆 Click a row above to see its full signal breakdown.")
 
 # ---------------------------------------------------------------------------
+# Tab 2 helpers
+# ---------------------------------------------------------------------------
+def _split_ai_commentary(text, tickers):
+    """Split the full AI commentary blob into {ticker: section_text} by ### TICKER headings."""
+    if not text:
+        return {}
+    sections = {}
+    matches = list(re.finditer(r"^###\s+(.+?)$", text, re.MULTILINE))
+    for i, match in enumerate(matches):
+        heading = match.group(1).strip()
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        section_text = text[start:end].strip()
+        for ticker in tickers:
+            base = ticker.replace(".NS", "").replace(".BO", "")
+            if base in heading or ticker in heading:
+                sections[ticker] = section_text
+                break
+    return sections
+
+
+def _render_company_basics(basics):
+    """Render key ratios, quarterly P&L, cash flow, and shareholding from a fundamentals dict."""
+    info = basics["info"]
+    q_pl = basics["quarterly_pl"]
+    q_cf = basics["quarterly_cashflow"]
+    major_holders = basics["major_holders"]
+
+    def _v(key, fmt="{:.2f}"):
+        val = info.get(key)
+        if val is None:
+            return "—"
+        try:
+            return fmt.format(float(val))
+        except Exception:
+            return "—"
+
+    def _pct(key):
+        val = info.get(key)
+        if val is None:
+            return "—"
+        try:
+            return f"{float(val) * 100:.1f}%"
+        except Exception:
+            return "—"
+
+    def _mcap(key):
+        val = info.get(key)
+        if val is None:
+            return "—"
+        try:
+            cr = float(val) / 1e7
+            if cr >= 1e5:
+                return f"₹{cr / 1e5:.1f}L Cr"
+            if cr >= 1e3:
+                return f"₹{cr / 1e3:.0f}K Cr"
+            return f"₹{cr:.0f} Cr"
+        except Exception:
+            return "—"
+
+    def _fmt_qtr_col(col):
+        try:
+            return col.strftime("%b '%y")
+        except Exception:
+            return str(col)
+
+    def _fmt_cr_df(df, row_labels):
+        available = [r for r in row_labels if r in df.index]
+        if not available:
+            return None
+        out = df.loc[available].iloc[:, :4].copy()
+        out.columns = [_fmt_qtr_col(c) for c in out.columns]
+        out = out.apply(pd.to_numeric, errors="coerce") / 1e7
+        out = out.round(0)
+        return out
+
+    # --- Key ratios (2 rows of 4 metrics) ---
+    r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+    r1c1.metric("Market Cap", _mcap("marketCap"))
+    r1c2.metric("P/E (TTM)", _v("trailingPE"))
+    r1c3.metric("P/B", _v("priceToBook"))
+    r1c4.metric("EPS (TTM)", _v("trailingEps"))
+
+    r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+    r2c1.metric("ROE", _pct("returnOnEquity"))
+    r2c2.metric("D/E Ratio", _v("debtToEquity"))
+    r2c3.metric("Profit Margin", _pct("profitMargins"))
+    r2c4.metric("Dividend Yield", _pct("dividendYield"))
+
+    # --- Quarterly P&L ---
+    pl_display = _fmt_cr_df(q_pl, fundamentals._PL_ROWS)
+    if pl_display is not None:
+        st.markdown("**Quarterly P&L** *(₹ Cr)*")
+        st.dataframe(pl_display, use_container_width=True)
+    else:
+        st.caption("Quarterly P&L not available.")
+
+    # --- Quarterly Cash Flow ---
+    cf_display = _fmt_cr_df(q_cf, fundamentals._CF_ROWS)
+    if cf_display is not None:
+        st.markdown("**Quarterly Cash Flow** *(₹ Cr)*")
+        st.dataframe(cf_display, use_container_width=True)
+    else:
+        st.caption("Cash flow data not available.")
+
+    # --- Shareholding Pattern ---
+    if major_holders is not None and not major_holders.empty:
+        st.markdown("**Shareholding Pattern**")
+        st.dataframe(major_holders, use_container_width=True)
+    else:
+        st.caption("Shareholding data not available.")
+
+
+# ---------------------------------------------------------------------------
 # Tab 2: AI commentary
 # ---------------------------------------------------------------------------
 with tab_ai:
@@ -990,7 +1106,31 @@ with tab_ai:
                         st.rerun()
                     except Exception as _e:
                         st.error(f"Regeneration failed: {_e}")
-        st.markdown(_displayed_commentary)
+        # Prefetch all fundamentals in parallel when this tab is visible (cached, runs once per scan)
+        if active_tab == TAB_AI:
+            _prefetch_key = f"_basics_prefetched_{scan_date}"
+            if not st.session_state.get(_prefetch_key):
+                with st.spinner("Loading company fundamentals..."):
+                    fundamentals.prefetch_all(signals_df["ticker"].tolist())
+                st.session_state[_prefetch_key] = True
+
+        _ai_sections = _split_ai_commentary(_displayed_commentary, signals_df["ticker"].tolist())
+
+        for _, _ai_row in signals_df.iterrows():
+            _ticker = _ai_row["ticker"]
+            st.markdown("---")
+            st.markdown(f"### {_ticker} &nbsp; <span style='font-size:0.8em;font-weight:400'>{_ai_row['sector']} | Score {_ai_row['score']}/100</span>", unsafe_allow_html=True)
+            _section = _ai_sections.get(_ticker, "")
+            if _section:
+                st.markdown(_section)
+            else:
+                st.caption("AI commentary not parsed for this stock.")
+            with st.expander("📊 Company Basics", expanded=False):
+                _basics = fundamentals.get_company_basics(_ticker)
+                if _basics:
+                    _render_company_basics(_basics)
+                else:
+                    st.caption("Could not load fundamental data for this stock.")
     else:
         st.markdown("_No commentary available. Run a scan to generate AI commentary._")
 

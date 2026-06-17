@@ -554,6 +554,7 @@ def register_user(email, name):
         raise
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_all_authorized_users():
     """Returns all registered users (active and revoked) as a list of dicts, oldest first."""
     try:
@@ -573,6 +574,7 @@ def revoke_user(email):
     try:
         with get_connection() as conn:
             conn.execute("UPDATE authorized_users SET status = 'revoked' WHERE email = ?", (email,))
+        get_all_authorized_users.clear()
     except _DB_ERRORS as e:
         print(f"[db_handler] Failed to revoke user {email}: {e}")
         raise
@@ -583,6 +585,7 @@ def restore_user(email):
     try:
         with get_connection() as conn:
             conn.execute("UPDATE authorized_users SET status = 'active' WHERE email = ?", (email,))
+        get_all_authorized_users.clear()
     except _DB_ERRORS as e:
         print(f"[db_handler] Failed to restore user {email}: {e}")
         raise
@@ -648,6 +651,7 @@ def get_custom_analysis_by_id(analysis_id):
         return None
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_event_summary():
     """Returns (counts_by_event, recent_events) for the Admin analytics panel.
 

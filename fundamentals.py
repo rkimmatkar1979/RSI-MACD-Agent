@@ -40,7 +40,7 @@ def _ticker_to_screener(ticker: str) -> str:
     return ticker.replace(".NS", "").replace(".BO", "")
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=604800, show_spinner=False)
 def get_shareholding(ticker: str) -> pd.DataFrame | None:
     """
     Scrapes the last 4 quarters of shareholding pattern from screener.in.
@@ -93,7 +93,7 @@ def get_shareholding(ticker: str) -> pd.DataFrame | None:
     return None
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=604800, show_spinner=False)
 def get_company_basics(ticker: str):
     """
     Returns a dict with:

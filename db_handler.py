@@ -648,6 +648,36 @@ def get_custom_analysis_by_id(analysis_id):
         return None
 
 
+def get_event_summary():
+    """Returns (counts_by_event, recent_events) for the Admin analytics panel.
+
+    counts_by_event — {event_name: total_count}
+    recent_events   — list of dicts [{ts, user_email, event, props}], newest first, limit 30
+    """
+    try:
+        with get_connection() as conn:
+            count_rows = conn.execute(
+                "SELECT event, COUNT(*) AS cnt FROM events GROUP BY event ORDER BY cnt DESC"
+            ).fetchall()
+            recent_rows = conn.execute(
+                "SELECT ts, user_email, event, props FROM events ORDER BY ts DESC LIMIT 30"
+            ).fetchall()
+        counts = {r["event"]: r["cnt"] for r in count_rows}
+        recent = [
+            {
+                "Time": r["ts"][:19].replace("T", " "),
+                "User": r["user_email"] or "—",
+                "Event": r["event"],
+                "Props": r["props"],
+            }
+            for r in recent_rows
+        ]
+        return counts, recent
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to fetch event summary: {e}")
+        return {}, []
+
+
 def log_event(user_email, event, props=None):
     """Fire-and-forget analytics event. Never raises — analytics must never crash the app."""
     try:

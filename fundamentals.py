@@ -94,13 +94,60 @@ def get_shareholding(ticker: str) -> pd.DataFrame | None:
 
 
 @st.cache_data(ttl=604800, show_spinner=False)
+def get_screener_cashflow(ticker: str) -> pd.DataFrame | None:
+    """
+    Scrapes the annual Cash Flow statement from screener.in.
+    Returns a DataFrame (rows = CF line items, cols = FY labels, last 4 FYs)
+    or None on failure.
+    """
+    slug = _ticker_to_screener(ticker)
+    for suffix in ("/consolidated/", "/"):
+        try:
+            url = f"https://www.screener.in/company/{slug}{suffix}"
+            r = requests.get(url, headers=_SCREENER_HEADERS, timeout=10)
+            if r.status_code != 200:
+                continue
+            soup = BeautifulSoup(r.text, "html.parser")
+            for section in soup.find_all("section"):
+                h2 = section.find("h2")
+                if not h2 or "Cash Flow" not in h2.text:
+                    continue
+                table = section.find("table")
+                if not table:
+                    break
+                rows = table.find_all("tr")
+                if not rows:
+                    break
+                header_cells = [td.get_text(strip=True) for td in rows[0].find_all(["th", "td"])]
+                fy_cols = header_cells[1:][-4:]
+                col_indices = [header_cells.index(q) for q in fy_cols]
+                data = {}
+                for row in rows[1:]:
+                    cells = [td.get_text(strip=True) for td in row.find_all(["th", "td"])]
+                    if not cells:
+                        continue
+                    label = cells[0].strip()
+                    if not label:
+                        continue
+                    values = [cells[ci] if ci < len(cells) else "—" for ci in col_indices]
+                    data[label] = values
+                if data:
+                    return pd.DataFrame(data, index=fy_cols).T
+            break
+        except Exception as e:
+            print(f"[fundamentals] cashflow scrape failed for {ticker}: {e}")
+    return None
+
+
+@st.cache_data(ttl=604800, show_spinner=False)
 def get_company_basics(ticker: str):
     """
     Returns a dict with:
-      info            — yfinance .info dict (key ratios, metadata)
-      quarterly_pl    — quarterly income statement (last 4 quarters)
-      annual_cashflow — annual cash flow statement (last 4 FYs)
-      shareholding    — quarterly Promoter/FII/DII/Public % from screener.in
+      info              — yfinance .info dict (key ratios, metadata)
+      quarterly_pl      — quarterly income statement (last 4 quarters)
+      annual_cashflow   — annual cash flow statement from yfinance (fallback)
+      screener_cashflow — annual cash flow from screener.in (primary)
+      shareholding      — quarterly Promoter/FII/DII/Public % from screener.in
     Returns None on failure.
     """
     try:
@@ -118,11 +165,13 @@ def get_company_basics(ticker: str):
             annual_cf = pd.DataFrame()
 
         shareholding = get_shareholding(ticker)
+        screener_cf = get_screener_cashflow(ticker)
 
         return {
             "info": info,
             "quarterly_pl": q_pl,
             "annual_cashflow": annual_cf,
+            "screener_cashflow": screener_cf,
             "shareholding": shareholding,
         }
     except Exception as e:
@@ -131,6 +180,6 @@ def get_company_basics(ticker: str):
 
 
 def prefetch_all(tickers):
-    """Warms the get_company_basics cache for all tickers in parallel (8 threads)."""
+    """Warms get_company_basics (and its screener sub-calls) for all tickers in parallel."""
     with ThreadPoolExecutor(max_workers=min(len(tickers), 8)) as ex:
         list(ex.map(get_company_basics, tickers))

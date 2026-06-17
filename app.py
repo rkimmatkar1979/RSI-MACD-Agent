@@ -567,15 +567,17 @@ TAB_SHORTLIST = "📋 Shortlist"
 TAB_AI = "🤖 AI Commentary"
 TAB_CHART = "📐 Chart Analysis"
 TAB_CUSTOM = "🎯 Custom Analysis"
+TAB_ANALYTICS = "📊 Analytics"
 TAB_ADMIN = "👑 Admin"
 _TAB_CONTAINER_KEYS = {
     TAB_SHORTLIST: "shortlist", TAB_AI: "ai", TAB_CHART: "chart",
-    TAB_CUSTOM: "custom", TAB_ADMIN: "admin",
+    TAB_CUSTOM: "custom", TAB_ANALYTICS: "analytics", TAB_ADMIN: "admin",
 }
 
 tab_names = [TAB_SHORTLIST, TAB_AI, TAB_CHART]
 if can_use_admin_tools:
     tab_names.append(TAB_CUSTOM)
+tab_names.append(TAB_ANALYTICS)
 if is_admin:
     tab_names.append(TAB_ADMIN)
 
@@ -646,6 +648,7 @@ tab_shortlist = st.container(key="tab_shortlist")
 tab_ai = st.container(key="tab_ai")
 tab_chart = st.container(key="tab_chart")
 tab_custom = st.container(key="tab_custom") if can_use_admin_tools else None
+tab_analytics = st.container(key="tab_analytics")
 tab_admin = st.container(key="tab_admin") if is_admin else None
 
 # ---------------------------------------------------------------------------
@@ -1069,14 +1072,20 @@ def _render_company_basics(basics):
     else:
         st.caption("Quarterly P&L not available.")
 
-    # --- Annual Cash Flow (last 4 FYs — quarterly CF unavailable for NSE stocks) ---
-    annual_cf = basics["annual_cashflow"]
-    cf_display = _extract_cr(annual_cf, fundamentals._CF_ROWS, _fmt_fy_col)
-    if cf_display is not None:
-        st.markdown("**Annual Cash Flow — last 4 FYs** *(₹ Cr)*")
-        st.dataframe(cf_display, use_container_width=True)
+    # --- Cash Flow: screener.in primary, yfinance fallback ---
+    screener_cf = basics.get("screener_cashflow")
+    if screener_cf is not None and not screener_cf.empty:
+        st.markdown("**Annual Cash Flow — last 4 FYs** *(₹ Cr, source: screener.in)*")
+        # screener.in values are already in ₹ Cr as strings; display as-is
+        st.dataframe(screener_cf, use_container_width=True)
     else:
-        st.caption("Cash flow data not available.")
+        annual_cf = basics["annual_cashflow"]
+        cf_display = _extract_cr(annual_cf, fundamentals._CF_ROWS, _fmt_fy_col)
+        if cf_display is not None:
+            st.markdown("**Annual Cash Flow — last 4 FYs** *(₹ Cr)*")
+            st.dataframe(cf_display, use_container_width=True)
+        else:
+            st.caption("Cash flow data not available.")
 
     # --- Shareholding Pattern (last 4 quarters from screener.in) ---
     if shareholding is not None and not shareholding.empty:
@@ -1647,6 +1656,29 @@ if is_admin:
                     if c5.button("Restore", key=f"restore_{u['email']}"):
                         db_handler.restore_user(u["email"])
                         st.rerun()
+
+# ---------------------------------------------------------------------------
+# Tab 5: Analytics
+# ---------------------------------------------------------------------------
+with tab_analytics:
+    st.subheader("📊 Usage Analytics")
+    _evt_counts, _evt_recent = db_handler.get_event_summary()
+
+    _ac1, _ac2, _ac3, _ac4 = st.columns(4)
+    _ac1.metric("Full Scans Run", _evt_counts.get("scan_run", 0))
+    _ac2.metric("Custom Analyses", _evt_counts.get("custom_analysis_run", 0))
+    _ac3.metric("Chart Views", _evt_counts.get("chart_viewed", 0))
+    _ac4.metric("Tab Switches", _evt_counts.get("tab_switch", 0))
+
+    if _evt_recent:
+        st.markdown("**Recent events (last 30)**")
+        st.dataframe(
+            pd.DataFrame(_evt_recent),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.caption("No events logged yet.")
 
 # ---------------------------------------------------------------------------
 # Footer

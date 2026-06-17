@@ -991,8 +991,6 @@ def _split_ai_commentary(text, tickers):
 def _render_company_basics(basics):
     """Render key ratios, quarterly P&L, cash flow, and shareholding from a fundamentals dict."""
     info = basics["info"]
-    q_pl = basics["quarterly_pl"]
-    q_cf = basics["quarterly_cashflow"]
     major_holders = basics["major_holders"]
 
     def _v(key, fmt="{:.2f}"):
@@ -1031,17 +1029,23 @@ def _render_company_basics(basics):
         try:
             return col.strftime("%b '%y")
         except Exception:
-            return str(col)
+            return str(col)[:10]
 
-    def _fmt_cr_df(df, row_labels):
+    def _fmt_fy_col(col):
+        # Indian FY ends March 31: 2026-03-31 → FY26
+        try:
+            return f"FY{str(col.year)[2:]}"
+        except Exception:
+            return str(col)[:10]
+
+    def _extract_cr(df, row_labels, col_fmt_fn, n_cols=4):
         available = [r for r in row_labels if r in df.index]
         if not available:
             return None
-        out = df.loc[available].iloc[:, :4].copy()
-        out.columns = [_fmt_qtr_col(c) for c in out.columns]
+        out = df.loc[available].iloc[:, :n_cols].copy()
+        out.columns = [col_fmt_fn(c) for c in out.columns]
         out = out.apply(pd.to_numeric, errors="coerce") / 1e7
-        out = out.round(0)
-        return out
+        return out.round(0)
 
     # --- Key ratios (2 rows of 4 metrics) ---
     r1c1, r1c2, r1c3, r1c4 = st.columns(4)
@@ -1056,18 +1060,20 @@ def _render_company_basics(basics):
     r2c3.metric("Profit Margin", _pct("profitMargins"))
     r2c4.metric("Dividend Yield", _pct("dividendYield"))
 
-    # --- Quarterly P&L ---
-    pl_display = _fmt_cr_df(q_pl, fundamentals._PL_ROWS)
+    # --- Quarterly P&L (last 4 quarters) ---
+    q_pl = basics["quarterly_pl"]
+    pl_display = _extract_cr(q_pl, fundamentals._PL_ROWS, _fmt_qtr_col)
     if pl_display is not None:
-        st.markdown("**Quarterly P&L** *(₹ Cr)*")
+        st.markdown("**Quarterly P&L — last 4 quarters** *(₹ Cr)*")
         st.dataframe(pl_display, use_container_width=True)
     else:
         st.caption("Quarterly P&L not available.")
 
-    # --- Quarterly Cash Flow ---
-    cf_display = _fmt_cr_df(q_cf, fundamentals._CF_ROWS)
+    # --- Annual Cash Flow (last 4 FYs — quarterly CF unavailable for NSE stocks) ---
+    annual_cf = basics["annual_cashflow"]
+    cf_display = _extract_cr(annual_cf, fundamentals._CF_ROWS, _fmt_fy_col)
     if cf_display is not None:
-        st.markdown("**Quarterly Cash Flow** *(₹ Cr)*")
+        st.markdown("**Annual Cash Flow — last 4 FYs** *(₹ Cr)*")
         st.dataframe(cf_display, use_container_width=True)
     else:
         st.caption("Cash flow data not available.")

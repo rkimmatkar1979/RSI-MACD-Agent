@@ -207,6 +207,15 @@ def init_db():
                     signals_json TEXT
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts TEXT NOT NULL,
+                    user_email TEXT,
+                    event TEXT NOT NULL,
+                    props TEXT
+                )
+            """)
 
             # Migration: add status to a table created by an older version.
             existing_user_cols = {row["name"] for row in conn.execute("PRAGMA table_info(authorized_users)")}
@@ -637,6 +646,18 @@ def get_custom_analysis_by_id(analysis_id):
     except _DB_ERRORS as e:
         print(f"[db_handler] Failed to fetch custom analysis {analysis_id}: {e}")
         return None
+
+
+def log_event(user_email, event, props=None):
+    """Fire-and-forget analytics event. Never raises — analytics must never crash the app."""
+    try:
+        with get_connection() as conn:
+            conn.execute(
+                "INSERT INTO events (ts, user_email, event, props) VALUES (?,?,?,?)",
+                (datetime.now().isoformat(), user_email or "", event, json.dumps(props or {})),
+            )
+    except Exception as e:
+        print(f"[db_handler] log_event failed silently: {e}")
 
 
 def delete_custom_analysis(analysis_id):

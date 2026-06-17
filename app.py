@@ -331,6 +331,8 @@ else:
     user_email = ""
     is_admin = False
 
+st.session_state["_user_email"] = user_email
+
 # The Custom Analysis tab (below) is gated on this rather than is_admin alone
 # - with auth disabled there's no concept of "other users" yet, so the tool
 # is available to whoever is running the app; once AUTH_ENABLED is turned on
@@ -366,6 +368,12 @@ if st.session_state.get("scan_in_progress"):
         db_handler.get_available_scan_dates.clear()
         db_handler.get_scan_by_date.clear()
         db_handler.get_scan_timestamps.clear()
+        st.session_state.pop("date_select", None)
+        db_handler.log_event(
+            st.session_state.get("_user_email", ""),
+            "scan_run",
+            {"scan_date": scan_date, "shortlist_size": len(shortlist)},
+        )
         st.session_state["scan_message"] = (
             "success",
             f"Scan complete for {scan_date}: {len(shortlist)} qualifying setup(s) found.",
@@ -407,6 +415,11 @@ if st.session_state.get("custom_analysis_in_progress"):
         db_handler.save_custom_analysis(custom_tickers, custom_df, custom_commentary)
         db_handler.get_available_custom_analyses.clear()
         db_handler.get_custom_analysis_by_id.clear()
+        db_handler.log_event(
+            st.session_state.get("_user_email", ""),
+            "custom_analysis_run",
+            {"tickers": custom_tickers, "ticker_count": len(custom_tickers)},
+        )
     except Exception as e:
         st.session_state["custom_analysis_error"] = (
             f"Analysis failed — please try again. If the issue persists, check your internet connection or LLM API key. (Detail: {e})"
@@ -593,6 +606,11 @@ with _dm_topbar_col:
         help="Toggle dark mode",
         label_visibility="collapsed",
     )
+
+_prev_tab = st.session_state.get("_last_logged_tab")
+if active_tab != _prev_tab:
+    st.session_state["_last_logged_tab"] = active_tab
+    db_handler.log_event(user_email, "tab_switch", {"tab": active_tab})
 
 # One combined <style> block (rather than one st.markdown call per hidden
 # tab) - fewer elements for Streamlit to ship to the frontend on every rerun.
@@ -1003,6 +1021,11 @@ with tab_chart:
         chart_ticker = st.selectbox(
             "Select a stock to analyze", ticker_list, key="chart_ticker_select"
         )
+
+        _prev_chart = st.session_state.get("_last_logged_chart")
+        if chart_ticker != _prev_chart:
+            st.session_state["_last_logged_chart"] = chart_ticker
+            db_handler.log_event(user_email, "chart_viewed", {"ticker": chart_ticker, "scan_date": scan_date})
 
         chart_df, levels, peak, trough = get_chart_data(chart_ticker)
         if chart_df is None:

@@ -637,3 +637,15 @@ def get_custom_analysis_by_id(analysis_id):
     except _DB_ERRORS as e:
         print(f"[db_handler] Failed to fetch custom analysis {analysis_id}: {e}")
         return None
+
+
+def delete_custom_analysis(analysis_id):
+    """Permanently deletes a custom analysis by id."""
+    try:
+        with get_connection() as conn:
+            conn.execute("DELETE FROM custom_analyses WHERE id = ?", (analysis_id,))
+        get_available_custom_analyses.clear()
+        get_custom_analysis_by_id.clear()
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to delete custom analysis {analysis_id}: {e}")
+        raise

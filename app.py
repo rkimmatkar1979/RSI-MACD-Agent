@@ -4,6 +4,7 @@ Streamlit dashboard for the Nifty 100 Swing Trading Agent.
 Run with:  streamlit run app.py
 """
 
+import html
 import io
 
 import openpyxl
@@ -517,9 +518,19 @@ with st.sidebar:
 # Resolve selected scan (data loaded above, date picked in sidebar)
 # ---------------------------------------------------------------------------
 if latest is None:
-    st.warning(
-        "No scans have been run yet. Click **Run Full Scan Now** in the sidebar "
-        "to generate the first shortlist."
+    st.markdown("---")
+    st.markdown("### Welcome to the Nifty 100 Swing Trading Agent")
+    st.info(
+        "No scans have been run yet. Click **Run Full Scan Now** in the sidebar to "
+        "scan all Nifty 100 stocks for RSI/MACD + Fibonacci setups. The first scan "
+        "takes 2–3 minutes."
+    )
+    st.markdown(
+        "**What you'll get after the scan:**\n"
+        "- 📋 **Shortlist** — stocks meeting the scoring threshold, ranked by signal strength\n"
+        "- 🤖 **AI Commentary** — AI-generated write-up on each shortlisted stock\n"
+        "- 📐 **Chart Analysis** — Fibonacci retracement levels + RSI/MACD chart for any stock\n"
+        "- 🎯 **Custom Analysis** — on-demand AI write-up for any stocks you pick"
     )
     st.stop()
 
@@ -568,9 +579,20 @@ if "_pending_active_tab" in st.session_state:
 
 if st.session_state.get("active_tab") not in tab_names:
     st.session_state["active_tab"] = tab_names[0]
-active_tab = st.segmented_control(
-    "View", tab_names, required=True, key="active_tab", label_visibility="collapsed",
-)
+_tab_col, _dm_topbar_col = st.columns([11, 1])
+with _tab_col:
+    active_tab = st.segmented_control(
+        "View", tab_names, required=True, key="active_tab", label_visibility="collapsed",
+    )
+with _dm_topbar_col:
+    st.toggle(
+        "🌙",
+        value=dark_mode,
+        key="dark_mode_topbar",
+        on_change=lambda: st.session_state.update(dark_mode_pref=st.session_state["dark_mode_topbar"]),
+        help="Toggle dark mode",
+        label_visibility="collapsed",
+    )
 
 # One combined <style> block (rather than one st.markdown call per hidden
 # tab) - fewer elements for Streamlit to ship to the frontend on every rerun.
@@ -588,6 +610,13 @@ st.markdown(
     {_hide_rule}
     @keyframes tabFadeIn {{ from {{ opacity: 0; }} to {{ opacity: 1; }} }}
     div[class*="st-key-tab_"] {{ animation: tabFadeIn 0.2s ease-in-out; }}
+    @media (max-width: 768px) {{
+        [data-testid="stHorizontalBlock"] {{ flex-wrap: wrap !important; }}
+        [data-testid="stHorizontalBlock"] > [data-testid="column"] {{
+            min-width: 45% !important;
+            flex: 1 1 45% !important;
+        }}
+    }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -646,6 +675,9 @@ def _style_macd_diff(val):
 # ---------------------------------------------------------------------------
 with tab_shortlist:
     st.subheader(f"Shortlist — {scan_date}")
+    _scan_ts = scan_timestamps.get(scan_date, "")
+    if _scan_ts:
+        st.caption(f"Last updated: {_scan_ts}")
 
     with st.expander("📐 How the score is calculated (max 100)", expanded=False):
         st.markdown(
@@ -745,8 +777,21 @@ stock's own signals.
 
         display_df = signals_df.copy()
         display_df["score_delta_display"] = display_df.apply(_score_delta_display, axis=1)
+        def _fmt_score_trend(scores):
+            if not scores:
+                return "—"
+            recent = scores[-4:]
+            parts = " → ".join(str(int(s)) for s in recent)
+            if len(recent) >= 2:
+                if recent[-1] > recent[0]:
+                    return parts + " ▲"
+                if recent[-1] < recent[0]:
+                    return parts + " ▼"
+                return parts + " →"
+            return parts
+
         display_df["score_trend"] = display_df["ticker"].map(
-            lambda t: score_history.get(t, [])
+            lambda t: _fmt_score_trend(score_history.get(t, []))
         )
         display_df["macd_hist_display"] = display_df.apply(
             lambda r: f"{r['macd_hist']:.2f} ({r['macd_hist_direction']})", axis=1
@@ -798,6 +843,13 @@ stock's own signals.
             "Ticker", "Sector", "Price", "RSI", "MACD-Signal Diff (dir)",
             "Nearest Fib", "Fib Dist %", "Score", "Δ vs Prev", "Score Trend",
         ]
+        _search = st.text_input(
+            "🔍 Filter by ticker", key="shortlist_search", placeholder="e.g. RELIANCE",
+            label_visibility="collapsed",
+        ).strip().upper()
+        if _search:
+            display_df = display_df[display_df["Ticker"].str.contains(_search, na=False)]
+
         col_check, col_download = st.columns([3, 1])
         with col_check:
             show_all_cols = st.checkbox(
@@ -831,11 +883,6 @@ stock's own signals.
         select_event = st.dataframe(
             styled_table, width=table_width, hide_index=True,
             on_select="rerun", selection_mode="single-row", key="shortlist_table",
-            column_config={
-                "Score Trend": st.column_config.LineChartColumn(
-                    "Score Trend", width="small", y_min=0, y_max=_MAX_SCORE,
-                ),
-            },
         )
         with st.expander("ℹ️ Reading the table", expanded=False):
             st.markdown(
@@ -844,7 +891,7 @@ stock's own signals.
                 f"**Score** — shaded green for stronger setups (darker = closer to max {_MAX_SCORE}). "
                 f"**Δ vs Prev** — score change vs the previous retained scan"
                 f"{f' ({prev_scan_date})' if prev_scan_date else ''}; 🆕 = new to the shortlist. "
-                f"**Score Trend** — sparkline across the last {config.SCAN_HISTORY_RETENTION_DAYS} retained scans.\n\n"
+                f"**Score Trend** — scores across the last {config.SCAN_HISTORY_RETENTION_DAYS} retained scans (oldest → newest), with ▲/▼/→ showing the overall direction.\n\n"
                 "**MACD-Signal Diff (dir)** — positive = MACD above Signal line (bullish), negative = below (bearish). "
                 "**(up)**/**(down)** shows whether the histogram rose or fell vs the prior session.\n\n"
                 "**Fib Dist %** — how close price is to its nearest Fibonacci retracement level. "
@@ -904,7 +951,30 @@ stock's own signals.
 # ---------------------------------------------------------------------------
 with tab_ai:
     st.subheader("🤖 AI Analyst Commentary")
-    st.markdown(ai_commentary if ai_commentary else "_No commentary available._")
+    _displayed_commentary = st.session_state.get(f"regen_{scan_date}", ai_commentary)
+    if _displayed_commentary:
+        _btn_col, _regen_col, _ = st.columns([1, 1, 6])
+        with _btn_col:
+            _escaped_comm = html.escape(_displayed_commentary)
+            st.markdown(
+                f'<textarea id="_ai_comm_text" style="position:fixed;left:-9999px">{_escaped_comm}</textarea>'
+                '<button onclick="navigator.clipboard.writeText(document.getElementById(\'_ai_comm_text\').value)'
+                '.then(()=>{{this.innerHTML=\'✅ Copied!\';setTimeout(()=>this.innerHTML=\'📋 Copy\',1500)}})"'
+                ' style="padding:4px 12px;border-radius:4px;border:1px solid #ccc;cursor:pointer;background:transparent">📋 Copy</button>',
+                unsafe_allow_html=True,
+            )
+        with _regen_col:
+            if st.button("🔄 Regenerate", key="regen_ai_btn"):
+                with st.spinner("Regenerating AI commentary..."):
+                    try:
+                        _new_comm = get_ai_recommendations(signals_df)
+                        st.session_state[f"regen_{scan_date}"] = _new_comm
+                        st.rerun()
+                    except Exception as _e:
+                        st.error(f"Regeneration failed: {_e}")
+        st.markdown(_displayed_commentary)
+    else:
+        st.markdown("_No commentary available. Run a scan to generate AI commentary._")
 
 # ---------------------------------------------------------------------------
 # Tab 3: Fibonacci retracement analysis
@@ -1297,45 +1367,72 @@ if can_use_admin_tools:
         if past_analyses:
             st.markdown("---")
 
-            _analysis_labels = {}
-            for _aid, _ts, _tickers in past_analyses:
-                _names = ", ".join(t.replace(".NS", "") for t in _tickers[:4])
-                _suffix = f" +{len(_tickers) - 4} more" if len(_tickers) > 4 else ""
-                _analysis_labels[_aid] = f"{_ts} — {_names}{_suffix}"
+            _history_search = st.text_input(
+                "🔍 Search past analyses by ticker",
+                key="custom_history_search",
+                placeholder="e.g. RELIANCE",
+                label_visibility="collapsed",
+            ).strip().upper()
 
-            selected_analysis_id = st.selectbox(
-                "Viewing analysis from:",
-                [a[0] for a in past_analyses],
-                format_func=lambda a_id: _analysis_labels.get(a_id, str(a_id)),
-                key="custom_analysis_select",
-            )
+            _filtered_analyses = [
+                (aid, ts, tickers) for aid, ts, tickers in past_analyses
+                if not _history_search or any(_history_search in t.upper() for t in tickers)
+            ]
 
-            _shimmer_html = """
-                <div style="padding:4px 0">
-                    <div class="shimmer-line" style="height:18px;width:45%;"></div>
-                    <div class="shimmer-line" style="height:13px;width:100%;"></div>
-                    <div class="shimmer-line" style="height:13px;width:96%;"></div>
-                    <div class="shimmer-line" style="height:13px;width:89%;"></div>
-                    <div class="shimmer-line" style="height:13px;width:93%;"></div>
-                    <div class="shimmer-line" style="height:13px;width:72%;"></div>
-                    <div class="shimmer-line" style="height:13px;width:98%;"></div>
-                    <div class="shimmer-line" style="height:13px;width:81%;"></div>
-                </div>
-            """
-            _result_area = st.empty()
-            _result_area.markdown(_shimmer_html, unsafe_allow_html=True)
-            try:
-                result = db_handler.get_custom_analysis_by_id(selected_analysis_id)
-                if result:
-                    result_tickers, result_df, result_commentary = result
-                    with _result_area.container():
-                        st.markdown(f"**Results for:** {', '.join(result_tickers)}")
-                        st.markdown(result_commentary if result_commentary else "_No commentary available._")
-                else:
+            if not _filtered_analyses:
+                st.info("No past analyses match that ticker.")
+            else:
+                _analysis_labels = {}
+                for _aid, _ts, _tickers in _filtered_analyses:
+                    _names = ", ".join(t.replace(".NS", "") for t in _tickers[:4])
+                    _suffix = f" +{len(_tickers) - 4} more" if len(_tickers) > 4 else ""
+                    _analysis_labels[_aid] = f"{_ts} — {_names}{_suffix}"
+
+                _sel_col, _del_col = st.columns([8, 1])
+                with _sel_col:
+                    selected_analysis_id = st.selectbox(
+                        "Viewing analysis from:",
+                        [a[0] for a in _filtered_analyses],
+                        format_func=lambda a_id: _analysis_labels.get(a_id, str(a_id)),
+                        key="custom_analysis_select",
+                    )
+                with _del_col:
+                    st.markdown("<div style='padding-top:28px'>", unsafe_allow_html=True)
+                    if st.button("🗑️ Delete", key="delete_custom_analysis", help="Delete this analysis"):
+                        try:
+                            db_handler.delete_custom_analysis(selected_analysis_id)
+                            st.session_state.pop("custom_analysis_select", None)
+                            st.rerun()
+                        except Exception:
+                            st.error("Could not delete — please try again.")
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                _shimmer_html = """
+                    <div style="padding:4px 0">
+                        <div class="shimmer-line" style="height:18px;width:45%;"></div>
+                        <div class="shimmer-line" style="height:13px;width:100%;"></div>
+                        <div class="shimmer-line" style="height:13px;width:96%;"></div>
+                        <div class="shimmer-line" style="height:13px;width:89%;"></div>
+                        <div class="shimmer-line" style="height:13px;width:93%;"></div>
+                        <div class="shimmer-line" style="height:13px;width:72%;"></div>
+                        <div class="shimmer-line" style="height:13px;width:98%;"></div>
+                        <div class="shimmer-line" style="height:13px;width:81%;"></div>
+                    </div>
+                """
+                _result_area = st.empty()
+                _result_area.markdown(_shimmer_html, unsafe_allow_html=True)
+                try:
+                    result = db_handler.get_custom_analysis_by_id(selected_analysis_id)
+                    if result:
+                        result_tickers, result_df, result_commentary = result
+                        with _result_area.container():
+                            st.markdown(f"**Results for:** {', '.join(result_tickers)}")
+                            st.markdown(result_commentary if result_commentary else "_No commentary available._")
+                    else:
+                        _result_area.empty()
+                except Exception:
                     _result_area.empty()
-            except Exception:
-                _result_area.empty()
-                st.error("Could not load analysis — please try again.")
+                    st.error("Could not load analysis — please try again.")
 
 # ---------------------------------------------------------------------------
 # Tab 5: Admin - manage who can access this app (admins only)

@@ -991,7 +991,7 @@ def _split_ai_commentary(text, tickers):
 def _render_company_basics(basics):
     """Render key ratios, quarterly P&L, cash flow, and shareholding from a fundamentals dict."""
     info = basics["info"]
-    major_holders = basics["major_holders"]
+    shareholding = basics.get("shareholding")
 
     def _v(key, fmt="{:.2f}"):
         val = info.get(key)
@@ -1078,10 +1078,10 @@ def _render_company_basics(basics):
     else:
         st.caption("Cash flow data not available.")
 
-    # --- Shareholding Pattern ---
-    if major_holders is not None and not major_holders.empty:
-        st.markdown("**Shareholding Pattern**")
-        st.dataframe(major_holders, use_container_width=True)
+    # --- Shareholding Pattern (last 4 quarters from screener.in) ---
+    if shareholding is not None and not shareholding.empty:
+        st.markdown("**Shareholding Pattern — last 4 quarters** *(% of shares)*")
+        st.dataframe(shareholding, use_container_width=True)
     else:
         st.caption("Shareholding data not available.")
 

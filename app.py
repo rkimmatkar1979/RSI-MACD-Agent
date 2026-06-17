@@ -435,16 +435,13 @@ if "scan_message" in st.session_state:
     level, message = st.session_state.pop("scan_message")
     getattr(st, level)(message)
 
-# Pre-load all DB caches upfront on every rerun so every tab renders from
-# an in-memory cache hit rather than a network/disk round-trip on tab switch.
-# All these functions are @st.cache_data, so the actual DB query only fires
-# when the TTL expires — subsequent calls within the TTL are instant.
+# Always-needed scan data — loaded upfront so the sidebar date selector
+# and the tab content that follow can reference it without a cold miss.
+# Tab-specific data (custom analyses, users, events) is loaded lazily
+# inside each tab section guarded by active_tab (see below).
 latest = db_handler.get_latest_scan()
 available_dates = db_handler.get_available_scan_dates()
 scan_timestamps = db_handler.get_scan_timestamps()
-_preloaded_custom_analyses = db_handler.get_available_custom_analyses()
-_preloaded_all_users = db_handler.get_all_authorized_users()
-_preloaded_evt_counts, _preloaded_evt_recent = db_handler.get_event_summary()
 
 # ---------------------------------------------------------------------------
 # Sidebar - controls
@@ -1546,7 +1543,10 @@ if can_use_admin_tools:
         if "custom_analysis_error" in st.session_state:
             st.error(st.session_state.pop("custom_analysis_error"))
 
-        past_analyses = _preloaded_custom_analyses
+        past_analyses = (
+            db_handler.get_available_custom_analyses()
+            if active_tab == TAB_CUSTOM else []
+        )
         if past_analyses:
             st.markdown("---")
 
@@ -1624,7 +1624,10 @@ if is_admin:
     with tab_admin:
         st.subheader("👑 User Access Management")
 
-        users = _preloaded_all_users
+        users = (
+            db_handler.get_all_authorized_users()
+            if active_tab == TAB_ADMIN else []
+        )
         active_count = sum(1 for u in users if u["status"] == "active")
         st.metric("Registered users", f"{active_count} / {config.AUTH_MAX_USERS}")
         admin_list = ", ".join(sorted(config.AUTH_ADMIN_EMAILS)) or "none configured"
@@ -1667,7 +1670,10 @@ if is_admin:
 # ---------------------------------------------------------------------------
 with tab_analytics:
     st.subheader("📊 Usage Analytics")
-    _evt_counts, _evt_recent = _preloaded_evt_counts, _preloaded_evt_recent
+    _evt_counts, _evt_recent = (
+        db_handler.get_event_summary()
+        if active_tab == TAB_ANALYTICS else ({}, [])
+    )
 
     _ac1, _ac2, _ac3, _ac4 = st.columns(4)
     _ac1.metric("Full Scans Run", _evt_counts.get("scan_run", 0))

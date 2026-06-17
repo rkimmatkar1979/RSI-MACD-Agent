@@ -1,5 +1,6 @@
 """Company fundamentals via yfinance + screener.in — cached data layer for the AI Commentary tab."""
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
@@ -31,6 +32,19 @@ _SCREENER_HEADERS = {
         "Chrome/120.0.0.0 Safari/537.36"
     )
 }
+
+# One requests.Session per thread — reuses the TCP/TLS connection to
+# screener.in within a prefetch batch instead of opening a fresh socket
+# for every ticker.
+_thread_local = threading.local()
+
+
+def _get_session() -> requests.Session:
+    if not hasattr(_thread_local, "session"):
+        s = requests.Session()
+        s.headers.update(_SCREENER_HEADERS)
+        _thread_local.session = s
+    return _thread_local.session
 
 
 def _ticker_to_screener(ticker: str) -> str:
@@ -67,7 +81,7 @@ def _scrape_screener_page(ticker: str) -> dict:
     for suffix in ("/consolidated/", "/"):
         try:
             url = f"https://www.screener.in/company/{slug}{suffix}"
-            r = requests.get(url, headers=_SCREENER_HEADERS, timeout=10)
+            r = _get_session().get(url, timeout=10)
             if r.status_code != 200:
                 continue
             soup = BeautifulSoup(r.text, "html.parser")

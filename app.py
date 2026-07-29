@@ -57,7 +57,10 @@ st.set_page_config(
     page_title=config.APP_TITLE,
     layout="wide",
     page_icon=config.APP_PAGE_ICON,
-    initial_sidebar_state="expanded",
+    # "auto" lets Streamlit decide based on viewport width - expanded on
+    # desktop, collapsed on phones so the sidebar doesn't cover the whole
+    # screen on first load.
+    initial_sidebar_state="auto",
 )
 
 # Dark mode toggle - the widget itself lives in the sidebar (below). Its
@@ -226,8 +229,8 @@ st.markdown(
         color: white !important;
     }}
 
-    /* ---- Mobile (≤ 640px) -------------------------------------------- */
-    @media (max-width: 640px) {{
+    /* ---- Mobile / narrow screens (≤ 768px) ---------------------------- */
+    @media (max-width: 768px) {{
         /* Tighten page padding on small screens */
         .block-container {{
             padding-left: 0.75rem !important;
@@ -282,9 +285,6 @@ def _ensure_db_initialized():
 
 
 _ensure_db_initialized()
-
-st.title(config.APP_TITLE)
-st.caption(config.APP_SUBTITLE)
 
 # ---------------------------------------------------------------------------
 # Authentication - Google sign-in via Streamlit's built-in auth (requires
@@ -348,9 +348,6 @@ can_use_admin_tools = is_admin or not config.AUTH_ENABLED
 # switching tabs used to abort an in-progress scan).
 # ---------------------------------------------------------------------------
 if st.session_state.get("scan_in_progress"):
-    st.title(config.APP_TITLE)
-    st.caption(config.APP_SUBTITLE)
-    st.markdown("---")
     st.subheader("🔄 Scanning Nifty 100...")
     st.caption(
         "Running full scan and requesting AI commentary — this takes a minute or two. "
@@ -396,9 +393,6 @@ if st.session_state.get("scan_in_progress"):
 # ---------------------------------------------------------------------------
 if st.session_state.get("custom_analysis_in_progress"):
     custom_tickers = st.session_state.get("custom_analysis_request", [])
-    st.title(config.APP_TITLE)
-    st.caption(config.APP_SUBTITLE)
-    st.markdown("---")
     st.subheader(f"🤖 Analysing {len(custom_tickers)} stock(s)...")
     st.caption(
         "Fetching technicals and generating AI commentary — this takes a minute or so. "
@@ -473,14 +467,10 @@ with st.sidebar:
         if st.button("Log out", key="sidebar_logout"):
             st.logout()
 
-        st.markdown("---")
-
     if st.button("🔍 Run Full Scan Now", type="primary", use_container_width=True):
         st.session_state["_pending_active_tab"] = st.session_state.get("active_tab")
         st.session_state["scan_in_progress"] = True
         st.rerun()
-
-    st.markdown("---")
 
     try:
         if is_market_open():
@@ -491,7 +481,6 @@ with st.sidebar:
         st.warning("Could not determine market hours.")
 
     if available_dates:
-        st.markdown("---")
         selected_date = st.selectbox(
             "Viewing scan from:",
             available_dates,
@@ -502,7 +491,6 @@ with st.sidebar:
     else:
         selected_date = None
 
-    st.markdown("---")
     with st.expander("⚙️ Strategy Parameters", expanded=False):
         st.caption(
             f"Universe: {len(config.SCAN_UNIVERSE)} tickers "
@@ -524,7 +512,6 @@ with st.sidebar:
             "by up-days vs down-days (proxy, not live order-book data)"
         )
 
-    st.markdown("---")
     st.markdown(
         f"Built by <a href='{config.AUTHOR_LINKEDIN_URL}' "
         f"target='_blank' style='color:#1a73e8;'>{config.AUTHOR_NAME}</a>",
@@ -535,7 +522,6 @@ with st.sidebar:
 # Resolve selected scan (data loaded above, date picked in sidebar)
 # ---------------------------------------------------------------------------
 if latest is None:
-    st.markdown("---")
     st.markdown("### Welcome to the Nifty 100 Swing Trading Agent")
     st.info(
         "No scans have been run yet. Click **Run Full Scan Now** in the sidebar to "
@@ -544,9 +530,8 @@ if latest is None:
     )
     st.markdown(
         "**What you'll get after the scan:**\n"
-        "- 📋 **Shortlist** — stocks meeting the scoring threshold, ranked by signal strength\n"
-        "- 🤖 **AI Commentary** — AI-generated write-up on each shortlisted stock\n"
-        "- 📐 **Chart Analysis** — Fibonacci retracement levels + RSI/MACD chart for any stock\n"
+        "- 📋 **Shortlist** — stocks meeting the scoring threshold, ranked by signal strength; "
+        "click any stock to see its AI write-up, fundamentals, and Fibonacci/RSI/MACD chart\n"
         "- 🎯 **Custom Analysis** — on-demand AI write-up for any stocks you pick"
     )
     st.stop()
@@ -566,19 +551,18 @@ if selected_date and selected_date != scan_date:
 selected_rows = []
 
 TAB_SHORTLIST = "📋 Shortlist"
-TAB_CHART = "📐 Chart Analysis"
 TAB_CUSTOM = "🎯 Custom Analysis"
 TAB_ANALYTICS = "📊 Analytics"
 TAB_ADMIN = "👑 Admin"
 _TAB_CONTAINER_KEYS = {
-    TAB_SHORTLIST: "shortlist", TAB_CHART: "chart",
+    TAB_SHORTLIST: "shortlist",
     TAB_CUSTOM: "custom", TAB_ANALYTICS: "analytics", TAB_ADMIN: "admin",
 }
 
 # Analytics tab temporarily disabled - flip this back to True to restore it.
 ANALYTICS_TAB_ENABLED = False
 
-tab_names = [TAB_SHORTLIST, TAB_CHART]
+tab_names = [TAB_SHORTLIST]
 if can_use_admin_tools:
     tab_names.append(TAB_CUSTOM)
 if ANALYTICS_TAB_ENABLED:
@@ -601,20 +585,9 @@ if "_pending_active_tab" in st.session_state:
 
 if st.session_state.get("active_tab") not in tab_names:
     st.session_state["active_tab"] = tab_names[0]
-_tab_col, _dm_topbar_col = st.columns([11, 1])
-with _tab_col:
-    active_tab = st.segmented_control(
-        "View", tab_names, required=True, key="active_tab", label_visibility="collapsed",
-    )
-with _dm_topbar_col:
-    st.toggle(
-        "🌙",
-        value=dark_mode,
-        key="dark_mode_topbar",
-        on_change=lambda: st.session_state.update(dark_mode_pref=st.session_state["dark_mode_topbar"]),
-        help="Toggle dark mode",
-        label_visibility="collapsed",
-    )
+active_tab = st.segmented_control(
+    "View", tab_names, required=True, key="active_tab", label_visibility="collapsed",
+)
 
 _prev_tab = st.session_state.get("_last_logged_tab")
 if active_tab != _prev_tab:
@@ -637,20 +610,12 @@ st.markdown(
     {_hide_rule}
     @keyframes tabFadeIn {{ from {{ opacity: 0; }} to {{ opacity: 1; }} }}
     div[class*="st-key-tab_"] {{ animation: tabFadeIn 0.2s ease-in-out; }}
-    @media (max-width: 768px) {{
-        [data-testid="stHorizontalBlock"] {{ flex-wrap: wrap !important; }}
-        [data-testid="stHorizontalBlock"] > [data-testid="column"] {{
-            min-width: 45% !important;
-            flex: 1 1 45% !important;
-        }}
-    }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 tab_shortlist = st.container(key="tab_shortlist")
-tab_chart = st.container(key="tab_chart")
 tab_custom = st.container(key="tab_custom") if can_use_admin_tools else None
 tab_analytics = st.container(key="tab_analytics") if ANALYTICS_TAB_ENABLED else None
 tab_admin = st.container(key="tab_admin") if is_admin else None
@@ -802,6 +767,332 @@ def _render_company_basics(basics):
         st.dataframe(shareholding, use_container_width=True)
     else:
         st.caption("Shareholding data not available.")
+
+
+def _render_chart_analysis(sel_row):
+    """Render the Fibonacci/RSI/MACD chart + breakdown for one shortlisted stock."""
+    chart_ticker = sel_row["ticker"]
+
+    _prev_chart = st.session_state.get("_last_logged_chart")
+    if chart_ticker != _prev_chart:
+        st.session_state["_last_logged_chart"] = chart_ticker
+        db_handler.log_event(user_email, "chart_viewed", {"ticker": chart_ticker, "scan_date": scan_date})
+
+    chart_df, levels, peak, trough = get_chart_data(chart_ticker)
+    if chart_df is None:
+        st.error(f"Could not load price data for {chart_ticker}.")
+    else:
+        # The actual swing high/low bars the Fib levels were derived from.
+        fib_window = chart_df.tail(config.FIB_LOOKBACK_DAYS)
+        peak_date = fib_window["High"].idxmax()
+        trough_date = fib_window["Low"].idxmin()
+
+        current_price = float(chart_df["Close"].iloc[-1])
+        current_ratio = (peak - current_price) / (peak - trough) if peak != trough else float("nan")
+        level_name, level_price, distance_pct = nearest_fib_level(current_price, levels)
+        _, avg_volume_20, volume_ratio = calculate_volume_metrics(chart_df)
+
+        # Limit the plotted chart to the most recent CHART_DISPLAY_MONTHS -
+        # indicators above (RSI/MACD/Fib levels/swing high-low) are still
+        # computed from the full history / FIB_LOOKBACK_DAYS window and
+        # apply across this shorter view.
+        display_cutoff = chart_df.index.max() - pd.DateOffset(months=config.CHART_DISPLAY_MONTHS)
+        chart_display_df = chart_df[chart_df.index >= display_cutoff]
+
+        # --- Price + volume + MACD chart ---------------------------------------
+        fig = make_subplots(
+            rows=3, cols=1, shared_xaxes=True,
+            row_heights=[0.5, 0.15, 0.35], vertical_spacing=0.03,
+            specs=[[{}], [{"secondary_y": True}], [{}]],
+        )
+
+        fig.add_trace(go.Candlestick(
+            x=chart_display_df.index,
+            open=chart_display_df["Open"], high=chart_display_df["High"],
+            low=chart_display_df["Low"], close=chart_display_df["Close"],
+            name=chart_ticker,
+        ), row=1, col=1)
+
+        # Shade the bands between consecutive Fibonacci levels so the
+        # retracement grid reads as zones, not just lines. Opacity bumped
+        # up to 0.18 (from an original 0.10) for better visibility against
+        # the light beige chart background.
+        zone_colors = [
+            "rgba(128,128,128,0.18)", "rgba(224,123,57,0.18)",
+            "rgba(184,134,11,0.18)", "rgba(46,139,87,0.18)",
+            "rgba(31,119,180,0.18)", "rgba(128,128,128,0.18)",
+        ]
+        sorted_levels = sorted(levels.items(), key=lambda kv: kv[1])
+        for i in range(len(sorted_levels) - 1):
+            (_, y0), (_, y1) = sorted_levels[i], sorted_levels[i + 1]
+            fig.add_hrect(
+                y0=y0, y1=y1, fillcolor=zone_colors[i % len(zone_colors)],
+                line_width=0, row=1, col=1,
+            )
+
+        # Darkgoldenrod (#b8860b) replaces the original gold (#d4af37) for
+        # the 38.2% level - the original was low-contrast on a light
+        # background.
+        level_colors = {
+            "0.0%": "grey", "23.6%": "#e07b39", "38.2%": "#b8860b",
+            "50.0%": "#2e8b57", "61.8%": "#1f77b4", "100.0%": "grey",
+        }
+        for name, price in levels.items():
+            color = level_colors.get(name, "grey")
+            fig.add_hline(
+                y=price,
+                line_dash="dash",
+                line_color=color,
+                line_width=1.5,
+                annotation_text=f"{name}: {price:.2f}",
+                annotation_position="right",
+                annotation_font=dict(size=11, color=color),
+                annotation_bgcolor=PLOTLY_ANNOTATION_BG,
+                annotation_bordercolor=color,
+                annotation_borderwidth=1,
+                row=1, col=1,
+            )
+
+        fig.add_hline(
+            y=current_price,
+            line_dash="solid",
+            line_color="#FF00FF",
+            line_width=2.5,
+            annotation_text=f"CMP: {current_price:.2f}",
+            annotation_position="left",
+            annotation_font=dict(size=12, color="#FF00FF"),
+            annotation_bgcolor=PLOTLY_ANNOTATION_BG,
+            annotation_bordercolor="#FF00FF",
+            annotation_borderwidth=1,
+            row=1, col=1,
+        )
+
+        # Mark the exact swing-high/swing-low bars the levels were measured
+        # from - but only if they fall within the displayed window, since
+        # the FIB_LOOKBACK_DAYS window (used to derive the levels) can
+        # extend further back than the CHART_DISPLAY_MONTHS shown here.
+        swing_x, swing_y, swing_text, swing_colors, swing_symbols = [], [], [], [], []
+        if peak_date >= display_cutoff:
+            swing_x.append(peak_date)
+            swing_y.append(peak)
+            swing_text.append(f"Swing High {peak:.2f}")
+            swing_colors.append("#2e8b57")
+            swing_symbols.append("triangle-down")
+        if trough_date >= display_cutoff:
+            swing_x.append(trough_date)
+            swing_y.append(trough)
+            swing_text.append(f"Swing Low {trough:.2f}")
+            swing_colors.append("#c0392b")
+            swing_symbols.append("triangle-up")
+
+        if swing_x:
+            fig.add_trace(go.Scatter(
+                x=swing_x,
+                y=swing_y,
+                mode="markers+text",
+                marker=dict(size=12, color=swing_colors, symbol=swing_symbols),
+                text=swing_text,
+                textposition="top center",
+                name="Swing points",
+                showlegend=False,
+            ), row=1, col=1)
+
+        # Volume bars (green/red by up/down day) + RSI line on a secondary axis.
+        vol_colors = [
+            "#2e8b57" if c >= o else "#c0392b"
+            for c, o in zip(chart_display_df["Close"], chart_display_df["Open"])
+        ]
+        fig.add_trace(go.Bar(
+            x=chart_display_df.index, y=chart_display_df["Volume"],
+            marker_color=vol_colors, name="Volume", showlegend=False,
+        ), row=2, col=1)
+        fig.add_trace(go.Scatter(
+            x=chart_display_df.index, y=chart_display_df["RSI"], mode="lines",
+            line=dict(color="#6a3d9a", width=1.5), name="RSI (14)",
+        ), row=2, col=1, secondary_y=True)
+        fig.add_hline(
+            y=config.RSI_OVERBOUGHT, line_dash="dot", line_color="#c0392b",
+            line_width=1, row=2, col=1, secondary_y=True,
+        )
+        fig.add_hline(
+            y=config.RSI_OVERSOLD, line_dash="dot", line_color="#2e8b57",
+            line_width=1, row=2, col=1, secondary_y=True,
+        )
+
+        # MACD panel: histogram (green/red by sign) + MACD/Signal lines + zero line.
+        macd_hist_colors = [
+            "#2e8b57" if v >= 0 else "#c0392b" for v in chart_display_df["MACD_HIST"]
+        ]
+        fig.add_trace(go.Bar(
+            x=chart_display_df.index, y=chart_display_df["MACD_HIST"],
+            marker_color=macd_hist_colors, name="MACD Histogram", showlegend=False,
+        ), row=3, col=1)
+        fig.add_trace(go.Scatter(
+            x=chart_display_df.index, y=chart_display_df["MACD"], mode="lines",
+            line=dict(color="#1f77b4", width=1.5), name="MACD",
+        ), row=3, col=1)
+        fig.add_trace(go.Scatter(
+            x=chart_display_df.index, y=chart_display_df["MACD_SIGNAL"], mode="lines",
+            line=dict(color="#e07b39", width=1.5), name="Signal",
+        ), row=3, col=1)
+        fig.add_hline(y=0, line_color="grey", line_width=1, row=3, col=1)
+
+        fig.update_layout(
+            title=(
+                f"{chart_ticker} — Last {config.CHART_DISPLAY_MONTHS} Months "
+                f"(Fibonacci levels from {config.FIB_LOOKBACK_DAYS}-Day range) "
+                "+ Volume/RSI + MACD"
+            ),
+            xaxis_rangeslider_visible=False,
+            height=900,
+            yaxis_title="Price (INR)",
+            yaxis2_title="Volume",
+            yaxis3_title="MACD",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            paper_bgcolor=PLOTLY_PAPER_BG,
+            plot_bgcolor=PLOTLY_PLOT_BG,
+            font_color=PLOTLY_FONT_COLOR,
+        )
+        fig.update_xaxes(gridcolor=PLOTLY_GRID_COLOR, zerolinecolor=PLOTLY_ZERO_COLOR, tickfont=dict(color=PLOTLY_FONT_COLOR))
+        fig.update_yaxes(gridcolor=PLOTLY_GRID_COLOR, zerolinecolor=PLOTLY_ZERO_COLOR, tickfont=dict(color=PLOTLY_FONT_COLOR))
+        fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1, secondary_y=True)
+        fig.update_xaxes(title_text="Date", tickformat="%d %b %Y", row=3, col=1)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # --- Metrics row 1, with arrows showing current MACD movement -----------
+        macd_now = float(chart_df["MACD"].iloc[-1])
+        macd_prev = float(chart_df["MACD"].iloc[-2])
+        hist_now = float(chart_df["MACD_HIST"].iloc[-1])
+        hist_prev = float(chart_df["MACD_HIST"].iloc[-2])
+
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.metric("RSI (14)", f"{chart_df['RSI'].iloc[-1]:.1f}")
+        with col2:
+            st.metric("MACD Line", f"{macd_now:.3f}", delta=f"{macd_now - macd_prev:+.3f}")
+        with col3:
+            st.metric("MACD Histogram", f"{hist_now:.3f}", delta=f"{hist_now - hist_prev:+.3f}")
+        with col4:
+            st.metric(f"Volume vs {config.VOLUME_AVG_WINDOW}D Avg", f"{volume_ratio:.2f}x")
+        with col5:
+            st.metric("Last Close", f"₹{current_price:.2f}")
+
+        st.caption(
+            "Arrows on **MACD Line** / **MACD Histogram** show the change vs. the "
+            "previous session (green = rising, red = falling) - a quick read on "
+            "the current direction of MACD momentum."
+        )
+
+        # --- Metrics row 2: previous session, buy/sell pressure, sector ---------
+        prev_date, prev_open, prev_close = get_reference_session(chart_df)
+        buy_pct, sell_pct = calculate_buy_sell_pressure(chart_df)
+
+        sector = sel_row["sector"]
+        sector_trend_pct = sel_row["sector_trend_pct"]
+
+        col6, col7, col8, col9, col10 = st.columns(5)
+        with col6:
+            st.metric("Prev Session Open", f"₹{prev_open:.2f}", help=f"Session: {prev_date}")
+        with col7:
+            st.metric(
+                "Prev Session Close", f"₹{prev_close:.2f}",
+                delta=f"{prev_close - prev_open:+.2f}", help=f"Session: {prev_date}",
+            )
+        with col8:
+            st.metric("Buy % / Sell %", f"{buy_pct:.0f}% / {sell_pct:.0f}%")
+        with col9:
+            st.metric("Sector", sector)
+        with col10:
+            if not pd.isna(sector_trend_pct):
+                st.metric(f"Sector Trend ({config.SECTOR_TREND_LOOKBACK_DAYS}D)", f"{sector_trend_pct * 100:+.2f}%")
+            else:
+                st.metric(f"Sector Trend ({config.SECTOR_TREND_LOOKBACK_DAYS}D)", "n/a")
+
+        if is_market_open():
+            st.caption(
+                f"**Prev Session** ({prev_date}): last completed session — today's live bar is excluded. "
+                f"**Buy % / Sell %**: volume-weighted proxy over {config.BUY_SELL_PRESSURE_WINDOW} sessions, not live order-book data."
+            )
+        else:
+            st.caption(
+                f"**Prev Session** ({prev_date}): today's just-closed session. "
+                f"**Buy % / Sell %**: volume-weighted proxy over {config.BUY_SELL_PRESSURE_WINDOW} sessions, not live order-book data."
+            )
+
+        st.markdown("**MACD Pattern Analysis**")
+        st.info(describe_macd_pattern(chart_df))
+
+        # --- Fibonacci retracement breakdown -------------------------------------
+        st.markdown("**How These Fibonacci Levels Were Chosen**")
+        st.caption(
+            f"Swing High: ₹{peak:.2f} on {peak_date.date()} | "
+            f"Swing Low: ₹{trough:.2f} on {trough_date.date()} "
+            f"(highest High / lowest Low over the last {config.FIB_LOOKBACK_DAYS} "
+            "trading days, marked on the chart above). Each level = Swing High − "
+            "ratio × (Swing High − Swing Low)."
+        )
+
+        fib_rows = []
+        for name, price in sorted(levels.items(), key=lambda kv: kv[1]):
+            ratio = float(name.strip("%")) / 100
+            dist_pct = (price - current_price) / current_price * 100 if current_price else float("nan")
+            fib_rows.append({
+                "Level": name,
+                "Ratio": round(ratio, 3),
+                "Price": round(price, 2),
+                "Distance from CMP %": round(dist_pct, 2),
+            })
+        fib_table = pd.DataFrame(fib_rows).style.set_properties(**{
+            "background-color": COLOR_TABLE_BG,
+            "color": COLOR_TABLE_TEXT,
+            "border": f"1px solid {COLOR_TABLE_GRID}",
+        })
+        st.dataframe(fib_table, width="stretch", hide_index=True)
+        st.caption(
+            "**Ratio**: the Fibonacci retracement ratio for that level (0.0 = swing "
+            "high, 1.0 = swing low). **Distance from CMP %**: positive = level is "
+            "above the current price (potential resistance), negative = below "
+            "(potential support)."
+        )
+
+        # --- Current position + likely next move ---------------------------------
+        st.markdown("**Current Position & Likely Next Move**")
+        st.markdown(
+            f"Price (₹{current_price:.2f}) sits at the **{current_ratio * 100:.1f}%** "
+            f"retracement of the swing range, nearest to the **{level_name}** level "
+            f"(₹{level_price:.2f}), {distance_pct * 100:.2f}% away."
+        )
+
+        levels_above = [(n, p) for n, p in levels.items() if p > current_price]
+        levels_below = [(n, p) for n, p in levels.items() if p < current_price]
+        next_resistance = min(levels_above, key=lambda kv: kv[1]) if levels_above else None
+        next_support = max(levels_below, key=lambda kv: kv[1]) if levels_below else None
+
+        if next_resistance:
+            r_name, r_price = next_resistance
+            st.markdown(
+                f"- **Resistance above:** {r_name} level at ₹{r_price:.2f} "
+                f"({(r_price - current_price) / current_price * 100:.2f}% above CMP)."
+            )
+        if next_support:
+            s_name, s_price = next_support
+            st.markdown(
+                f"- **Support below:** {s_name} level at ₹{s_price:.2f} "
+                f"({(current_price - s_price) / current_price * 100:.2f}% below CMP)."
+            )
+
+        if hist_now >= 0:
+            st.markdown(
+                "- MACD momentum is currently **bullish** (histogram above zero), "
+                "so price is more likely to move toward resistance / the swing "
+                "high while this holds."
+            )
+        else:
+            st.markdown(
+                "- MACD momentum is currently **bearish** (histogram below zero), "
+                "so price is more likely to move toward support / the swing low "
+                "while this holds."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1014,7 +1305,7 @@ stock's own signals.
         )
         select_event = st.dataframe(
             styled_table, width=table_width, hide_index=True,
-            on_select="rerun", selection_mode="single-row", key="shortlist_table",
+            on_select="rerun", selection_mode="single-row-required", key="shortlist_table",
         )
         with st.expander("ℹ️ Reading the table", expanded=False):
             st.markdown(
@@ -1076,7 +1367,6 @@ stock's own signals.
                 st.markdown(f"- {reason}")
 
             # --- AI analysis for the selected stock, inline ---------------------
-            st.markdown("---")
             st.markdown("#### 🤖 AI Analysis")
             _displayed_commentary = st.session_state.get(f"regen_{scan_date}", ai_commentary)
             _ai_section = (
@@ -1116,367 +1406,10 @@ stock's own signals.
                     _render_company_basics(_basics)
                 else:
                     st.caption("Could not load fundamental data for this stock.")
-        else:
-            st.caption(
-                "👆 Click a row above to see its full signal breakdown, AI analysis, "
-                "and fundamentals."
-            )
 
-# ---------------------------------------------------------------------------
-# Tab 3: Fibonacci retracement analysis
-# ---------------------------------------------------------------------------
-with tab_chart:
-    st.subheader("📐 Fibonacci Retracement Analysis")
-
-    if not signals_df.empty:
-        ticker_list = signals_df["ticker"].tolist()
-
-        # Sync with a clicked shortlist row above, if any - clicking a different
-        # row re-points this selector (and therefore the chart below) at that
-        # ticker. Manual changes to the selector below still work independently.
-        if selected_rows:
-            sel_ticker = signals_df.iloc[selected_rows[0]]["ticker"]
-            if sel_ticker in ticker_list:
-                st.session_state["chart_ticker_select"] = sel_ticker
-
-        if st.session_state.get("chart_ticker_select") not in ticker_list:
-            st.session_state["chart_ticker_select"] = ticker_list[0]
-
-        st.caption(
-            "👆 Click a row in the **Shortlist** tab to load that stock's "
-            "chart here, or pick one manually."
-        )
-        chart_ticker = st.selectbox(
-            "Select a stock to analyze", ticker_list, key="chart_ticker_select"
-        )
-
-        _prev_chart = st.session_state.get("_last_logged_chart")
-        if chart_ticker != _prev_chart:
-            st.session_state["_last_logged_chart"] = chart_ticker
-            db_handler.log_event(user_email, "chart_viewed", {"ticker": chart_ticker, "scan_date": scan_date})
-
-        chart_df, levels, peak, trough = get_chart_data(chart_ticker)
-        if chart_df is None:
-            st.error(f"Could not load price data for {chart_ticker}.")
-        else:
-            # The actual swing high/low bars the Fib levels were derived from.
-            fib_window = chart_df.tail(config.FIB_LOOKBACK_DAYS)
-            peak_date = fib_window["High"].idxmax()
-            trough_date = fib_window["Low"].idxmin()
-
-            current_price = float(chart_df["Close"].iloc[-1])
-            current_ratio = (peak - current_price) / (peak - trough) if peak != trough else float("nan")
-            level_name, level_price, distance_pct = nearest_fib_level(current_price, levels)
-            _, avg_volume_20, volume_ratio = calculate_volume_metrics(chart_df)
-
-            # Limit the plotted chart to the most recent CHART_DISPLAY_MONTHS -
-            # indicators above (RSI/MACD/Fib levels/swing high-low) are still
-            # computed from the full history / FIB_LOOKBACK_DAYS window and
-            # apply across this shorter view.
-            display_cutoff = chart_df.index.max() - pd.DateOffset(months=config.CHART_DISPLAY_MONTHS)
-            chart_display_df = chart_df[chart_df.index >= display_cutoff]
-
-            # --- Price + volume + MACD chart ---------------------------------------
-            fig = make_subplots(
-                rows=3, cols=1, shared_xaxes=True,
-                row_heights=[0.5, 0.15, 0.35], vertical_spacing=0.03,
-                specs=[[{}], [{"secondary_y": True}], [{}]],
-            )
-
-            fig.add_trace(go.Candlestick(
-                x=chart_display_df.index,
-                open=chart_display_df["Open"], high=chart_display_df["High"],
-                low=chart_display_df["Low"], close=chart_display_df["Close"],
-                name=chart_ticker,
-            ), row=1, col=1)
-
-            # Shade the bands between consecutive Fibonacci levels so the
-            # retracement grid reads as zones, not just lines. Opacity bumped
-            # up to 0.18 (from an original 0.10) for better visibility against
-            # the light beige chart background.
-            zone_colors = [
-                "rgba(128,128,128,0.18)", "rgba(224,123,57,0.18)",
-                "rgba(184,134,11,0.18)", "rgba(46,139,87,0.18)",
-                "rgba(31,119,180,0.18)", "rgba(128,128,128,0.18)",
-            ]
-            sorted_levels = sorted(levels.items(), key=lambda kv: kv[1])
-            for i in range(len(sorted_levels) - 1):
-                (_, y0), (_, y1) = sorted_levels[i], sorted_levels[i + 1]
-                fig.add_hrect(
-                    y0=y0, y1=y1, fillcolor=zone_colors[i % len(zone_colors)],
-                    line_width=0, row=1, col=1,
-                )
-
-            # Darkgoldenrod (#b8860b) replaces the original gold (#d4af37) for
-            # the 38.2% level - the original was low-contrast on a light
-            # background.
-            level_colors = {
-                "0.0%": "grey", "23.6%": "#e07b39", "38.2%": "#b8860b",
-                "50.0%": "#2e8b57", "61.8%": "#1f77b4", "100.0%": "grey",
-            }
-            for name, price in levels.items():
-                color = level_colors.get(name, "grey")
-                fig.add_hline(
-                    y=price,
-                    line_dash="dash",
-                    line_color=color,
-                    line_width=1.5,
-                    annotation_text=f"{name}: {price:.2f}",
-                    annotation_position="right",
-                    annotation_font=dict(size=11, color=color),
-                    annotation_bgcolor=PLOTLY_ANNOTATION_BG,
-                    annotation_bordercolor=color,
-                    annotation_borderwidth=1,
-                    row=1, col=1,
-                )
-
-            fig.add_hline(
-                y=current_price,
-                line_dash="solid",
-                line_color="#FF00FF",
-                line_width=2.5,
-                annotation_text=f"CMP: {current_price:.2f}",
-                annotation_position="left",
-                annotation_font=dict(size=12, color="#FF00FF"),
-                annotation_bgcolor=PLOTLY_ANNOTATION_BG,
-                annotation_bordercolor="#FF00FF",
-                annotation_borderwidth=1,
-                row=1, col=1,
-            )
-
-            # Mark the exact swing-high/swing-low bars the levels were measured
-            # from - but only if they fall within the displayed window, since
-            # the FIB_LOOKBACK_DAYS window (used to derive the levels) can
-            # extend further back than the CHART_DISPLAY_MONTHS shown here.
-            swing_x, swing_y, swing_text, swing_colors, swing_symbols = [], [], [], [], []
-            if peak_date >= display_cutoff:
-                swing_x.append(peak_date)
-                swing_y.append(peak)
-                swing_text.append(f"Swing High {peak:.2f}")
-                swing_colors.append("#2e8b57")
-                swing_symbols.append("triangle-down")
-            if trough_date >= display_cutoff:
-                swing_x.append(trough_date)
-                swing_y.append(trough)
-                swing_text.append(f"Swing Low {trough:.2f}")
-                swing_colors.append("#c0392b")
-                swing_symbols.append("triangle-up")
-
-            if swing_x:
-                fig.add_trace(go.Scatter(
-                    x=swing_x,
-                    y=swing_y,
-                    mode="markers+text",
-                    marker=dict(size=12, color=swing_colors, symbol=swing_symbols),
-                    text=swing_text,
-                    textposition="top center",
-                    name="Swing points",
-                    showlegend=False,
-                ), row=1, col=1)
-
-            # Volume bars (green/red by up/down day) + RSI line on a secondary axis.
-            vol_colors = [
-                "#2e8b57" if c >= o else "#c0392b"
-                for c, o in zip(chart_display_df["Close"], chart_display_df["Open"])
-            ]
-            fig.add_trace(go.Bar(
-                x=chart_display_df.index, y=chart_display_df["Volume"],
-                marker_color=vol_colors, name="Volume", showlegend=False,
-            ), row=2, col=1)
-            fig.add_trace(go.Scatter(
-                x=chart_display_df.index, y=chart_display_df["RSI"], mode="lines",
-                line=dict(color="#6a3d9a", width=1.5), name="RSI (14)",
-            ), row=2, col=1, secondary_y=True)
-            fig.add_hline(
-                y=config.RSI_OVERBOUGHT, line_dash="dot", line_color="#c0392b",
-                line_width=1, row=2, col=1, secondary_y=True,
-            )
-            fig.add_hline(
-                y=config.RSI_OVERSOLD, line_dash="dot", line_color="#2e8b57",
-                line_width=1, row=2, col=1, secondary_y=True,
-            )
-
-            # MACD panel: histogram (green/red by sign) + MACD/Signal lines + zero line.
-            macd_hist_colors = [
-                "#2e8b57" if v >= 0 else "#c0392b" for v in chart_display_df["MACD_HIST"]
-            ]
-            fig.add_trace(go.Bar(
-                x=chart_display_df.index, y=chart_display_df["MACD_HIST"],
-                marker_color=macd_hist_colors, name="MACD Histogram", showlegend=False,
-            ), row=3, col=1)
-            fig.add_trace(go.Scatter(
-                x=chart_display_df.index, y=chart_display_df["MACD"], mode="lines",
-                line=dict(color="#1f77b4", width=1.5), name="MACD",
-            ), row=3, col=1)
-            fig.add_trace(go.Scatter(
-                x=chart_display_df.index, y=chart_display_df["MACD_SIGNAL"], mode="lines",
-                line=dict(color="#e07b39", width=1.5), name="Signal",
-            ), row=3, col=1)
-            fig.add_hline(y=0, line_color="grey", line_width=1, row=3, col=1)
-
-            fig.update_layout(
-                title=(
-                    f"{chart_ticker} — Last {config.CHART_DISPLAY_MONTHS} Months "
-                    f"(Fibonacci levels from {config.FIB_LOOKBACK_DAYS}-Day range) "
-                    "+ Volume/RSI + MACD"
-                ),
-                xaxis_rangeslider_visible=False,
-                height=900,
-                yaxis_title="Price (INR)",
-                yaxis2_title="Volume",
-                yaxis3_title="MACD",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                paper_bgcolor=PLOTLY_PAPER_BG,
-                plot_bgcolor=PLOTLY_PLOT_BG,
-                font_color=PLOTLY_FONT_COLOR,
-            )
-            fig.update_xaxes(gridcolor=PLOTLY_GRID_COLOR, zerolinecolor=PLOTLY_ZERO_COLOR, tickfont=dict(color=PLOTLY_FONT_COLOR))
-            fig.update_yaxes(gridcolor=PLOTLY_GRID_COLOR, zerolinecolor=PLOTLY_ZERO_COLOR, tickfont=dict(color=PLOTLY_FONT_COLOR))
-            fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1, secondary_y=True)
-            fig.update_xaxes(title_text="Date", tickformat="%d %b %Y", row=3, col=1)
-            st.plotly_chart(fig, use_container_width=True)
-
-            # --- Metrics row 1, with arrows showing current MACD movement -----------
-            macd_now = float(chart_df["MACD"].iloc[-1])
-            macd_prev = float(chart_df["MACD"].iloc[-2])
-            hist_now = float(chart_df["MACD_HIST"].iloc[-1])
-            hist_prev = float(chart_df["MACD_HIST"].iloc[-2])
-
-            col1, col2, col3, col4, col5 = st.columns(5)
-            with col1:
-                st.metric("RSI (14)", f"{chart_df['RSI'].iloc[-1]:.1f}")
-            with col2:
-                st.metric("MACD Line", f"{macd_now:.3f}", delta=f"{macd_now - macd_prev:+.3f}")
-            with col3:
-                st.metric("MACD Histogram", f"{hist_now:.3f}", delta=f"{hist_now - hist_prev:+.3f}")
-            with col4:
-                st.metric(f"Volume vs {config.VOLUME_AVG_WINDOW}D Avg", f"{volume_ratio:.2f}x")
-            with col5:
-                st.metric("Last Close", f"₹{current_price:.2f}")
-
-            st.caption(
-                "Arrows on **MACD Line** / **MACD Histogram** show the change vs. the "
-                "previous session (green = rising, red = falling) - a quick read on "
-                "the current direction of MACD momentum."
-            )
-
-            # --- Metrics row 2: previous session, buy/sell pressure, sector ---------
-            prev_date, prev_open, prev_close = get_reference_session(chart_df)
-            buy_pct, sell_pct = calculate_buy_sell_pressure(chart_df)
-
-            chart_match = signals_df[signals_df["ticker"] == chart_ticker]
-            if not chart_match.empty:
-                sector = chart_match.iloc[0]["sector"]
-                sector_trend_pct = chart_match.iloc[0]["sector_trend_pct"]
-            else:
-                sector = config.SECTOR_MAP.get(chart_ticker, "Unknown")
-                sector_trend_pct = float("nan")
-
-            col6, col7, col8, col9, col10 = st.columns(5)
-            with col6:
-                st.metric("Prev Session Open", f"₹{prev_open:.2f}", help=f"Session: {prev_date}")
-            with col7:
-                st.metric(
-                    "Prev Session Close", f"₹{prev_close:.2f}",
-                    delta=f"{prev_close - prev_open:+.2f}", help=f"Session: {prev_date}",
-                )
-            with col8:
-                st.metric("Buy % / Sell %", f"{buy_pct:.0f}% / {sell_pct:.0f}%")
-            with col9:
-                st.metric("Sector", sector)
-            with col10:
-                if not pd.isna(sector_trend_pct):
-                    st.metric(f"Sector Trend ({config.SECTOR_TREND_LOOKBACK_DAYS}D)", f"{sector_trend_pct * 100:+.2f}%")
-                else:
-                    st.metric(f"Sector Trend ({config.SECTOR_TREND_LOOKBACK_DAYS}D)", "n/a")
-
-            if is_market_open():
-                st.caption(
-                    f"**Prev Session** ({prev_date}): last completed session — today's live bar is excluded. "
-                    f"**Buy % / Sell %**: volume-weighted proxy over {config.BUY_SELL_PRESSURE_WINDOW} sessions, not live order-book data."
-                )
-            else:
-                st.caption(
-                    f"**Prev Session** ({prev_date}): today's just-closed session. "
-                    f"**Buy % / Sell %**: volume-weighted proxy over {config.BUY_SELL_PRESSURE_WINDOW} sessions, not live order-book data."
-                )
-
-            st.markdown("**MACD Pattern Analysis**")
-            st.info(describe_macd_pattern(chart_df))
-
-            # --- Fibonacci retracement breakdown -------------------------------------
-            st.markdown("**How These Fibonacci Levels Were Chosen**")
-            st.caption(
-                f"Swing High: ₹{peak:.2f} on {peak_date.date()} | "
-                f"Swing Low: ₹{trough:.2f} on {trough_date.date()} "
-                f"(highest High / lowest Low over the last {config.FIB_LOOKBACK_DAYS} "
-                "trading days, marked on the chart above). Each level = Swing High − "
-                "ratio × (Swing High − Swing Low)."
-            )
-
-            fib_rows = []
-            for name, price in sorted(levels.items(), key=lambda kv: kv[1]):
-                ratio = float(name.strip("%")) / 100
-                dist_pct = (price - current_price) / current_price * 100 if current_price else float("nan")
-                fib_rows.append({
-                    "Level": name,
-                    "Ratio": round(ratio, 3),
-                    "Price": round(price, 2),
-                    "Distance from CMP %": round(dist_pct, 2),
-                })
-            fib_table = pd.DataFrame(fib_rows).style.set_properties(**{
-                "background-color": COLOR_TABLE_BG,
-                "color": COLOR_TABLE_TEXT,
-                "border": f"1px solid {COLOR_TABLE_GRID}",
-            })
-            st.dataframe(fib_table, width="stretch", hide_index=True)
-            st.caption(
-                "**Ratio**: the Fibonacci retracement ratio for that level (0.0 = swing "
-                "high, 1.0 = swing low). **Distance from CMP %**: positive = level is "
-                "above the current price (potential resistance), negative = below "
-                "(potential support)."
-            )
-
-            # --- Current position + likely next move ---------------------------------
-            st.markdown("**Current Position & Likely Next Move**")
-            st.markdown(
-                f"Price (₹{current_price:.2f}) sits at the **{current_ratio * 100:.1f}%** "
-                f"retracement of the swing range, nearest to the **{level_name}** level "
-                f"(₹{level_price:.2f}), {distance_pct * 100:.2f}% away."
-            )
-
-            levels_above = [(n, p) for n, p in levels.items() if p > current_price]
-            levels_below = [(n, p) for n, p in levels.items() if p < current_price]
-            next_resistance = min(levels_above, key=lambda kv: kv[1]) if levels_above else None
-            next_support = max(levels_below, key=lambda kv: kv[1]) if levels_below else None
-
-            if next_resistance:
-                r_name, r_price = next_resistance
-                st.markdown(
-                    f"- **Resistance above:** {r_name} level at ₹{r_price:.2f} "
-                    f"({(r_price - current_price) / current_price * 100:.2f}% above CMP)."
-                )
-            if next_support:
-                s_name, s_price = next_support
-                st.markdown(
-                    f"- **Support below:** {s_name} level at ₹{s_price:.2f} "
-                    f"({(current_price - s_price) / current_price * 100:.2f}% below CMP)."
-                )
-
-            if hist_now >= 0:
-                st.markdown(
-                    "- MACD momentum is currently **bullish** (histogram above zero), "
-                    "so price is more likely to move toward resistance / the swing "
-                    "high while this holds."
-                )
-            else:
-                st.markdown(
-                    "- MACD momentum is currently **bearish** (histogram below zero), "
-                    "so price is more likely to move toward support / the swing low "
-                    "while this holds."
-                )
-    else:
-        st.info("Run a scan to enable the Fibonacci retracement analysis.")
+            # --- Chart analysis for the selected stock, inline ------------------
+            st.markdown("#### 📐 Fibonacci Retracement Chart")
+            _render_chart_analysis(sel_row)
 
 # ---------------------------------------------------------------------------
 # Tab 4: Custom Analysis - on-demand AI Entry/Stop-Loss/Take-Profit write-up
@@ -1519,8 +1452,6 @@ if can_use_admin_tools:
             if active_tab == TAB_CUSTOM else []
         )
         if past_analyses:
-            st.markdown("---")
-
             _history_search = st.text_input(
                 "🔍 Search past analyses by ticker",
                 key="custom_history_search",
@@ -1666,6 +1597,5 @@ if ANALYTICS_TAB_ENABLED:
 # ---------------------------------------------------------------------------
 # Footer
 # ---------------------------------------------------------------------------
-st.markdown("---")
 st.caption(config.FOOTER_ABOUT)
 st.caption(config.FOOTER_DISCLAIMER)

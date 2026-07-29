@@ -51,7 +51,7 @@ APP_PAGE_ICON = "📈"
 APP_SUBTITLE = "Nifty 100 Swing Trading Agent"
 APP_TAGLINE = (
     "Mathematical screening (RSI, MACD, Fibonacci retracements) "
-    "+ Grok AI commentary, tuned for 2-3 week swing setups."
+    "+ Grok AI commentary, tuned for 3-month swing setups."
 )
 
 # Set to True to show the dark mode toggle in the sidebar.
@@ -65,7 +65,7 @@ AUTHOR_NAME = "Rishikesh Kimmatkar"
 AUTHOR_LINKEDIN_URL = "https://www.linkedin.com/in/rishikesh-kimmatkar/"
 FOOTER_ABOUT = (
     f"📈 **{APP_SUBTITLE}** — mathematical screening (RSI, MACD, "
-    "Fibonacci retracements) plus AI-generated commentary, for 2-3 week swing "
+    "Fibonacci retracements) plus AI-generated commentary, for 3-month swing "
     "setups on NSE-listed stocks and Gold/Silver ETFs. Price data via Yahoo "
     "Finance (yfinance); AI commentary via the configured LLM API."
 )
@@ -78,7 +78,7 @@ FOOTER_DISCLAIMER = (
 # ---------------------------------------------------------------------------
 # Data & Scan
 # ---------------------------------------------------------------------------
-# Daily candles throughout — appropriate for a 2-3 week swing trading horizon.
+# Daily candles throughout — appropriate for a 3-month swing trading horizon.
 DATA_PERIOD = "1y"
 DATA_INTERVAL = "1d"
 

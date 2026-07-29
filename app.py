@@ -566,20 +566,23 @@ if selected_date and selected_date != scan_date:
 selected_rows = []
 
 TAB_SHORTLIST = "📋 Shortlist"
-TAB_AI = "🤖 AI Commentary"
 TAB_CHART = "📐 Chart Analysis"
 TAB_CUSTOM = "🎯 Custom Analysis"
 TAB_ANALYTICS = "📊 Analytics"
 TAB_ADMIN = "👑 Admin"
 _TAB_CONTAINER_KEYS = {
-    TAB_SHORTLIST: "shortlist", TAB_AI: "ai", TAB_CHART: "chart",
+    TAB_SHORTLIST: "shortlist", TAB_CHART: "chart",
     TAB_CUSTOM: "custom", TAB_ANALYTICS: "analytics", TAB_ADMIN: "admin",
 }
 
-tab_names = [TAB_SHORTLIST, TAB_AI, TAB_CHART]
+# Analytics tab temporarily disabled - flip this back to True to restore it.
+ANALYTICS_TAB_ENABLED = False
+
+tab_names = [TAB_SHORTLIST, TAB_CHART]
 if can_use_admin_tools:
     tab_names.append(TAB_CUSTOM)
-tab_names.append(TAB_ANALYTICS)
+if ANALYTICS_TAB_ENABLED:
+    tab_names.append(TAB_ANALYTICS)
 if is_admin:
     tab_names.append(TAB_ADMIN)
 
@@ -647,38 +650,21 @@ st.markdown(
 )
 
 tab_shortlist = st.container(key="tab_shortlist")
-tab_ai = st.container(key="tab_ai")
 tab_chart = st.container(key="tab_chart")
 tab_custom = st.container(key="tab_custom") if can_use_admin_tools else None
-tab_analytics = st.container(key="tab_analytics")
+tab_analytics = st.container(key="tab_analytics") if ANALYTICS_TAB_ENABLED else None
 tab_admin = st.container(key="tab_admin") if is_admin else None
 
 # ---------------------------------------------------------------------------
 # Shortlist table styling - color cues so strong/weak signals are visible at
 # a glance instead of requiring a column-by-column read.
 # ---------------------------------------------------------------------------
-_MAX_SCORE = (
-    config.SCORE_FIB_KEY_LEVEL + config.SCORE_RSI_EXTREME
-    + config.SCORE_MACD_PROXIMITY + config.SCORE_VOLUME + config.SCORE_SECTOR_TREND
-)
-
-
 def _style_rsi(val):
     """Green = oversold (potential bullish reversal), red = overbought (bearish)."""
     if val <= config.RSI_OVERSOLD:
         return "background-color: #d4edda; color: #155724; font-weight: 600"
     if val >= config.RSI_OVERBOUGHT:
         return "background-color: #f8d7da; color: #721c24; font-weight: 600"
-    return ""
-
-
-def _style_score(val):
-    """Shade Score green, more intensely the closer it is to the max of 100."""
-    ratio = max(0.0, min(1.0, val / _MAX_SCORE))
-    if ratio >= 0.7:
-        return "background-color: #c3e6cb; color: #155724; font-weight: 700"
-    if ratio >= 0.45:
-        return "background-color: #e6f4ea; color: #1e7e34; font-weight: 600"
     return ""
 
 
@@ -693,6 +679,129 @@ def _style_macd_diff(val):
     if diff < 0:
         return "color: #c0392b; font-weight: 600"
     return ""
+
+
+def _split_ai_commentary(text, tickers):
+    """Split the full AI commentary blob into {ticker: section_text} by ### TICKER headings."""
+    if not text:
+        return {}
+    sections = {}
+    matches = list(re.finditer(r"^###\s+(.+?)$", text, re.MULTILINE))
+    for i, match in enumerate(matches):
+        heading = match.group(1).strip()
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        section_text = text[start:end].strip()
+        for ticker in tickers:
+            base = ticker.replace(".NS", "").replace(".BO", "")
+            if base in heading or ticker in heading:
+                sections[ticker] = section_text
+                break
+    return sections
+
+
+def _render_company_basics(basics):
+    """Render key ratios, quarterly P&L, cash flow, and shareholding from a fundamentals dict."""
+    info = basics["info"]
+    shareholding = basics.get("shareholding")
+
+    def _v(key, fmt="{:.2f}"):
+        val = info.get(key)
+        if val is None:
+            return "—"
+        try:
+            return fmt.format(float(val))
+        except Exception:
+            return "—"
+
+    def _pct(key):
+        val = info.get(key)
+        if val is None:
+            return "—"
+        try:
+            return f"{float(val) * 100:.1f}%"
+        except Exception:
+            return "—"
+
+    def _mcap(key):
+        val = info.get(key)
+        if val is None:
+            return "—"
+        try:
+            cr = float(val) / 1e7
+            if cr >= 1e5:
+                return f"₹{cr / 1e5:.1f}L Cr"
+            if cr >= 1e3:
+                return f"₹{cr / 1e3:.0f}K Cr"
+            return f"₹{cr:.0f} Cr"
+        except Exception:
+            return "—"
+
+    def _fmt_qtr_col(col):
+        try:
+            return col.strftime("%b '%y")
+        except Exception:
+            return str(col)[:10]
+
+    def _fmt_fy_col(col):
+        # Indian FY ends March 31: 2026-03-31 → FY26
+        try:
+            return f"FY{str(col.year)[2:]}"
+        except Exception:
+            return str(col)[:10]
+
+    def _extract_cr(df, row_labels, col_fmt_fn, n_cols=4):
+        available = [r for r in row_labels if r in df.index]
+        if not available:
+            return None
+        out = df.loc[available].iloc[:, :n_cols].copy()
+        out.columns = [col_fmt_fn(c) for c in out.columns]
+        out = out.apply(pd.to_numeric, errors="coerce") / 1e7
+        return out.round(0)
+
+    # --- Key ratios (2 rows of 4 metrics) ---
+    r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+    r1c1.metric("Market Cap", _mcap("marketCap"))
+    r1c2.metric("P/E (TTM)", _v("trailingPE"))
+    r1c3.metric("P/B", _v("priceToBook"))
+    r1c4.metric("EPS (TTM)", _v("trailingEps"))
+
+    r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+    r2c1.metric("ROE", _pct("returnOnEquity"))
+    r2c2.metric("D/E Ratio", _v("debtToEquity"))
+    r2c3.metric("Profit Margin", _pct("profitMargins"))
+    r2c4.metric("Dividend Yield", _pct("dividendYield"))
+
+    # --- Quarterly P&L (last 4 quarters) ---
+    q_pl = basics["quarterly_pl"]
+    pl_display = _extract_cr(q_pl, fundamentals._PL_ROWS, _fmt_qtr_col)
+    if pl_display is not None:
+        st.markdown("**Quarterly P&L — last 4 quarters** *(₹ Cr)*")
+        st.dataframe(pl_display, use_container_width=True)
+    else:
+        st.caption("Quarterly P&L not available.")
+
+    # --- Cash Flow: screener.in primary, yfinance fallback ---
+    screener_cf = basics.get("screener_cashflow")
+    if screener_cf is not None and not screener_cf.empty:
+        st.markdown("**Annual Cash Flow — last 4 FYs** *(₹ Cr, source: screener.in)*")
+        # screener.in values are already in ₹ Cr as strings; display as-is
+        st.dataframe(screener_cf, use_container_width=True)
+    else:
+        annual_cf = basics["annual_cashflow"]
+        cf_display = _extract_cr(annual_cf, fundamentals._CF_ROWS, _fmt_fy_col)
+        if cf_display is not None:
+            st.markdown("**Annual Cash Flow — last 4 FYs** *(₹ Cr)*")
+            st.dataframe(cf_display, use_container_width=True)
+        else:
+            st.caption("Cash flow data not available.")
+
+    # --- Shareholding Pattern (last 4 quarters from screener.in) ---
+    if shareholding is not None and not shareholding.empty:
+        st.markdown("**Shareholding Pattern — last 4 quarters** *(% of shares)*")
+        st.dataframe(shareholding, use_container_width=True)
+    else:
+        st.caption("Shareholding data not available.")
 
 
 # ---------------------------------------------------------------------------
@@ -833,7 +942,7 @@ stock's own signals.
             "ticker", "sector", "close", "rsi", "macd_hist_display", "nearest_fib_level",
             "nearest_fib_price", "fib_distance_pct", "week52_high",
             "pct_from_52w_high", "volume_ratio", "buy_sell_display",
-            "sector_trend_display", "score", "score_delta_display", "score_trend",
+            "sector_trend_display", "score_delta_display", "score_trend",
             "signals_display",
         ]].rename(columns={
             "ticker": "Ticker",
@@ -849,7 +958,6 @@ stock's own signals.
             "volume_ratio": "Vol vs 20D Avg",
             "buy_sell_display": "Buy % / Sell %",
             "sector_trend_display": "Sector Trend % (10D)",
-            "score": "Score",
             "score_delta_display": "Δ vs Prev",
             "score_trend": "Score Trend",
             "signals_display": "Signals",
@@ -866,7 +974,7 @@ stock's own signals.
         # always shown in the per-row detail panel when a row is clicked.
         compact_columns = [
             "Ticker", "Sector", "Price", "RSI", "MACD-Signal Diff (dir)",
-            "Nearest Fib", "Fib Dist %", "Score", "Δ vs Prev", "Score Trend",
+            "Nearest Fib", "Fib Dist %", "Δ vs Prev", "Score Trend",
         ]
         _search = st.text_input(
             "🔍 Filter by ticker", key="shortlist_search", placeholder="e.g. RELIANCE",
@@ -902,7 +1010,6 @@ stock's own signals.
                 "border": f"1px solid {COLOR_TABLE_GRID}",
             })
             .map(_style_rsi, subset=["RSI"])
-            .map(_style_score, subset=["Score"])
             .map(_style_macd_diff, subset=["MACD-Signal Diff (dir)"])
         )
         select_event = st.dataframe(
@@ -913,7 +1020,6 @@ stock's own signals.
             st.markdown(
                 f"**RSI** — 🟩 green when oversold (≤ {config.RSI_OVERSOLD}, possible bullish reversal), "
                 f"🟥 red when overbought (≥ {config.RSI_OVERBOUGHT}, possible bearish reversal).\n\n"
-                f"**Score** — shaded green for stronger setups (darker = closer to max {_MAX_SCORE}). "
                 f"**Δ vs Prev** — score change vs the previous retained scan"
                 f"{f' ({prev_scan_date})' if prev_scan_date else ''}; 🆕 = new to the shortlist. "
                 f"**Score Trend** — scores across the last {config.SCAN_HISTORY_RETENTION_DAYS} retained scans (oldest → newest), with ▲/▼/→ showing the overall direction.\n\n"
@@ -968,188 +1074,53 @@ stock's own signals.
 
             for reason in sel_row["reasons"]:
                 st.markdown(f"- {reason}")
-        else:
-            st.caption("👆 Click a row above to see its full signal breakdown.")
 
-# ---------------------------------------------------------------------------
-# Tab 2 helpers
-# ---------------------------------------------------------------------------
-def _split_ai_commentary(text, tickers):
-    """Split the full AI commentary blob into {ticker: section_text} by ### TICKER headings."""
-    if not text:
-        return {}
-    sections = {}
-    matches = list(re.finditer(r"^###\s+(.+?)$", text, re.MULTILINE))
-    for i, match in enumerate(matches):
-        heading = match.group(1).strip()
-        start = match.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        section_text = text[start:end].strip()
-        for ticker in tickers:
-            base = ticker.replace(".NS", "").replace(".BO", "")
-            if base in heading or ticker in heading:
-                sections[ticker] = section_text
-                break
-    return sections
-
-
-def _render_company_basics(basics):
-    """Render key ratios, quarterly P&L, cash flow, and shareholding from a fundamentals dict."""
-    info = basics["info"]
-    shareholding = basics.get("shareholding")
-
-    def _v(key, fmt="{:.2f}"):
-        val = info.get(key)
-        if val is None:
-            return "—"
-        try:
-            return fmt.format(float(val))
-        except Exception:
-            return "—"
-
-    def _pct(key):
-        val = info.get(key)
-        if val is None:
-            return "—"
-        try:
-            return f"{float(val) * 100:.1f}%"
-        except Exception:
-            return "—"
-
-    def _mcap(key):
-        val = info.get(key)
-        if val is None:
-            return "—"
-        try:
-            cr = float(val) / 1e7
-            if cr >= 1e5:
-                return f"₹{cr / 1e5:.1f}L Cr"
-            if cr >= 1e3:
-                return f"₹{cr / 1e3:.0f}K Cr"
-            return f"₹{cr:.0f} Cr"
-        except Exception:
-            return "—"
-
-    def _fmt_qtr_col(col):
-        try:
-            return col.strftime("%b '%y")
-        except Exception:
-            return str(col)[:10]
-
-    def _fmt_fy_col(col):
-        # Indian FY ends March 31: 2026-03-31 → FY26
-        try:
-            return f"FY{str(col.year)[2:]}"
-        except Exception:
-            return str(col)[:10]
-
-    def _extract_cr(df, row_labels, col_fmt_fn, n_cols=4):
-        available = [r for r in row_labels if r in df.index]
-        if not available:
-            return None
-        out = df.loc[available].iloc[:, :n_cols].copy()
-        out.columns = [col_fmt_fn(c) for c in out.columns]
-        out = out.apply(pd.to_numeric, errors="coerce") / 1e7
-        return out.round(0)
-
-    # --- Key ratios (2 rows of 4 metrics) ---
-    r1c1, r1c2, r1c3, r1c4 = st.columns(4)
-    r1c1.metric("Market Cap", _mcap("marketCap"))
-    r1c2.metric("P/E (TTM)", _v("trailingPE"))
-    r1c3.metric("P/B", _v("priceToBook"))
-    r1c4.metric("EPS (TTM)", _v("trailingEps"))
-
-    r2c1, r2c2, r2c3, r2c4 = st.columns(4)
-    r2c1.metric("ROE", _pct("returnOnEquity"))
-    r2c2.metric("D/E Ratio", _v("debtToEquity"))
-    r2c3.metric("Profit Margin", _pct("profitMargins"))
-    r2c4.metric("Dividend Yield", _pct("dividendYield"))
-
-    # --- Quarterly P&L (last 4 quarters) ---
-    q_pl = basics["quarterly_pl"]
-    pl_display = _extract_cr(q_pl, fundamentals._PL_ROWS, _fmt_qtr_col)
-    if pl_display is not None:
-        st.markdown("**Quarterly P&L — last 4 quarters** *(₹ Cr)*")
-        st.dataframe(pl_display, use_container_width=True)
-    else:
-        st.caption("Quarterly P&L not available.")
-
-    # --- Cash Flow: screener.in primary, yfinance fallback ---
-    screener_cf = basics.get("screener_cashflow")
-    if screener_cf is not None and not screener_cf.empty:
-        st.markdown("**Annual Cash Flow — last 4 FYs** *(₹ Cr, source: screener.in)*")
-        # screener.in values are already in ₹ Cr as strings; display as-is
-        st.dataframe(screener_cf, use_container_width=True)
-    else:
-        annual_cf = basics["annual_cashflow"]
-        cf_display = _extract_cr(annual_cf, fundamentals._CF_ROWS, _fmt_fy_col)
-        if cf_display is not None:
-            st.markdown("**Annual Cash Flow — last 4 FYs** *(₹ Cr)*")
-            st.dataframe(cf_display, use_container_width=True)
-        else:
-            st.caption("Cash flow data not available.")
-
-    # --- Shareholding Pattern (last 4 quarters from screener.in) ---
-    if shareholding is not None and not shareholding.empty:
-        st.markdown("**Shareholding Pattern — last 4 quarters** *(% of shares)*")
-        st.dataframe(shareholding, use_container_width=True)
-    else:
-        st.caption("Shareholding data not available.")
-
-
-# ---------------------------------------------------------------------------
-# Tab 2: AI commentary
-# ---------------------------------------------------------------------------
-with tab_ai:
-    st.subheader("🤖 AI Analyst Commentary")
-    _displayed_commentary = st.session_state.get(f"regen_{scan_date}", ai_commentary)
-    if _displayed_commentary:
-        _btn_col, _regen_col, _ = st.columns([1, 1, 6])
-        with _btn_col:
-            _escaped_comm = html.escape(_displayed_commentary)
-            st.markdown(
-                f'<textarea id="_ai_comm_text" style="position:fixed;left:-9999px">{_escaped_comm}</textarea>'
-                '<button onclick="navigator.clipboard.writeText(document.getElementById(\'_ai_comm_text\').value)'
-                '.then(()=>{{this.innerHTML=\'✅ Copied!\';setTimeout(()=>this.innerHTML=\'📋 Copy\',1500)}})"'
-                ' style="padding:4px 12px;border-radius:4px;border:1px solid #ccc;cursor:pointer;background:transparent">📋 Copy</button>',
-                unsafe_allow_html=True,
-            )
-        with _regen_col:
-            if st.button("🔄 Regenerate", key="regen_ai_btn"):
-                with st.spinner("Regenerating AI commentary..."):
-                    try:
-                        _new_comm = get_ai_recommendations(signals_df)
-                        st.session_state[f"regen_{scan_date}"] = _new_comm
-                        st.rerun()
-                    except Exception as _e:
-                        st.error(f"Regeneration failed: {_e}")
-        # Prefetch all fundamentals in parallel when this tab is visible (cached, runs once per scan)
-        if active_tab == TAB_AI:
-            _prefetch_key = f"_basics_prefetched_{scan_date}"
-            if not st.session_state.get(_prefetch_key):
-                with st.spinner("Loading company fundamentals..."):
-                    fundamentals.prefetch_all(signals_df["ticker"].tolist())
-                st.session_state[_prefetch_key] = True
-
-        _ai_sections = _split_ai_commentary(_displayed_commentary, signals_df["ticker"].tolist())
-
-        for _, _ai_row in signals_df.iterrows():
-            _ticker = _ai_row["ticker"]
+            # --- AI analysis for the selected stock, inline ---------------------
             st.markdown("---")
-            st.markdown(f"### {_ticker} &nbsp; <span style='font-size:0.8em;font-weight:400'>{_ai_row['sector']} | Score {_ai_row['score']}/100</span>", unsafe_allow_html=True)
-            _section = _ai_sections.get(_ticker, "")
-            if _section:
-                st.markdown(_section)
+            st.markdown("#### 🤖 AI Analysis")
+            _displayed_commentary = st.session_state.get(f"regen_{scan_date}", ai_commentary)
+            _ai_section = (
+                _split_ai_commentary(_displayed_commentary, [sel_row["ticker"]]).get(sel_row["ticker"], "")
+                if _displayed_commentary else ""
+            )
+            if _ai_section:
+                _btn_col, _regen_col, _ = st.columns([1, 1, 6])
+                with _btn_col:
+                    _escaped_comm = html.escape(_ai_section)
+                    st.markdown(
+                        f'<textarea id="_ai_comm_text" style="position:fixed;left:-9999px">{_escaped_comm}</textarea>'
+                        '<button onclick="navigator.clipboard.writeText(document.getElementById(\'_ai_comm_text\').value)'
+                        '.then(()=>{{this.innerHTML=\'✅ Copied!\';setTimeout(()=>this.innerHTML=\'📋 Copy\',1500)}})"'
+                        ' style="padding:4px 12px;border-radius:4px;border:1px solid #ccc;cursor:pointer;background:transparent">📋 Copy</button>',
+                        unsafe_allow_html=True,
+                    )
+                with _regen_col:
+                    if st.button("🔄 Regenerate", key="regen_ai_btn"):
+                        with st.spinner("Regenerating AI commentary..."):
+                            try:
+                                _new_comm = get_ai_recommendations(signals_df)
+                                st.session_state[f"regen_{scan_date}"] = _new_comm
+                                st.rerun()
+                            except Exception as _e:
+                                st.error(f"Regeneration failed: {_e}")
+                st.markdown(_ai_section)
             else:
-                st.caption("AI commentary not parsed for this stock.")
-            with st.expander("📊 Company Basics", expanded=False):
-                _basics = fundamentals.get_company_basics(_ticker)
+                st.caption(
+                    "No AI write-up for this stock yet - only the top-ranked picks "
+                    "get a full Entry/Stop-Loss/Take-Profit analysis at scan time."
+                )
+
+            with st.expander("📊 Company Basics (promoter holding, revenue, profit)", expanded=False):
+                _basics = fundamentals.get_company_basics(sel_row["ticker"])
                 if _basics:
                     _render_company_basics(_basics)
                 else:
                     st.caption("Could not load fundamental data for this stock.")
-    else:
-        st.markdown("_No commentary available. Run a scan to generate AI commentary._")
+        else:
+            st.caption(
+                "👆 Click a row above to see its full signal breakdown, AI analysis, "
+                "and fundamentals."
+            )
 
 # ---------------------------------------------------------------------------
 # Tab 3: Fibonacci retracement analysis
@@ -1666,30 +1637,31 @@ if is_admin:
                         st.rerun()
 
 # ---------------------------------------------------------------------------
-# Tab 5: Analytics
+# Tab 5: Analytics (temporarily disabled - see ANALYTICS_TAB_ENABLED above)
 # ---------------------------------------------------------------------------
-with tab_analytics:
-    st.subheader("📊 Usage Analytics")
-    _evt_counts, _evt_recent = (
-        db_handler.get_event_summary()
-        if active_tab == TAB_ANALYTICS else ({}, [])
-    )
-
-    _ac1, _ac2, _ac3, _ac4 = st.columns(4)
-    _ac1.metric("Full Scans Run", _evt_counts.get("scan_run", 0))
-    _ac2.metric("Custom Analyses", _evt_counts.get("custom_analysis_run", 0))
-    _ac3.metric("Chart Views", _evt_counts.get("chart_viewed", 0))
-    _ac4.metric("Tab Switches", _evt_counts.get("tab_switch", 0))
-
-    if _evt_recent:
-        st.markdown("**Recent events (last 30)**")
-        st.dataframe(
-            pd.DataFrame(_evt_recent),
-            use_container_width=True,
-            hide_index=True,
+if ANALYTICS_TAB_ENABLED:
+    with tab_analytics:
+        st.subheader("📊 Usage Analytics")
+        _evt_counts, _evt_recent = (
+            db_handler.get_event_summary()
+            if active_tab == TAB_ANALYTICS else ({}, [])
         )
-    else:
-        st.caption("No events logged yet.")
+
+        _ac1, _ac2, _ac3, _ac4 = st.columns(4)
+        _ac1.metric("Full Scans Run", _evt_counts.get("scan_run", 0))
+        _ac2.metric("Custom Analyses", _evt_counts.get("custom_analysis_run", 0))
+        _ac3.metric("Chart Views", _evt_counts.get("chart_viewed", 0))
+        _ac4.metric("Tab Switches", _evt_counts.get("tab_switch", 0))
+
+        if _evt_recent:
+            st.markdown("**Recent events (last 30)**")
+            st.dataframe(
+                pd.DataFrame(_evt_recent),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.caption("No events logged yet.")
 
 # ---------------------------------------------------------------------------
 # Footer

@@ -4,9 +4,11 @@ LLM analyst integration (any OpenAI-compatible chat completions API).
 Takes the mathematical shortlist produced by strategy.py, compresses it
 into a dense plain-text block, and asks the configured LLM for a concise
 swing-trading execution plan (Entry / Stop-Loss / Take-Profit) for the
-top-ranked picks (config.AI_TOP_PICKS_COUNT), calibrated for a 2-3 week
-holding horizon. Recent news headlines for those picks are fetched via
-yfinance and included as extra context.
+top-ranked picks (config.AI_TOP_PICKS_COUNT), calibrated for a 3-month
+holding horizon. Recent news headlines and fundamentals (promoter holding,
+revenue/profit trend) for those picks are fetched via yfinance/screener.in
+and included as extra context, so the buy evaluation weighs business
+quality alongside the technical setup.
 """
 
 import hashlib
@@ -16,6 +18,7 @@ import requests
 
 import config
 import db_handler
+import fundamentals
 from ta_engine import fetch_news
 
 # Explanation of the decimal-valued columns sent to the AI, also surfaced to
@@ -107,6 +110,88 @@ def _format_news(tickers):
     return "\n".join(lines)
 
 
+def _format_fundamentals(tickers):
+    """
+    Fetches promoter shareholding trend, quarterly revenue/profit trend, and
+    key ratios for each ticker and formats them as a dense one-line-per-ticker
+    block - the fundamentals counterpart to `_format_shortlist`'s technicals,
+    so the LLM's buy evaluation weighs business quality (is the promoter
+    holding stable/rising, is revenue and profit actually growing) alongside
+    the chart setup, not just price action in isolation.
+
+    Fetched concurrently (config.SCAN_MAX_WORKERS threads) via
+    fundamentals.get_company_basics, which is itself cached for a week -
+    only a cache miss actually hits yfinance/screener.in.
+    """
+    basics_by_ticker = {}
+    with ThreadPoolExecutor(max_workers=min(len(tickers), config.SCAN_MAX_WORKERS)) as executor:
+        future_to_ticker = {executor.submit(fundamentals.get_company_basics, t): t for t in tickers}
+        for future in as_completed(future_to_ticker):
+            ticker = future_to_ticker[future]
+            try:
+                basics_by_ticker[ticker] = future.result()
+            except Exception as e:
+                print(f"[ai_analyst] Failed to fetch fundamentals for {ticker}: {e}")
+                basics_by_ticker[ticker] = None
+
+    def _pct(val):
+        try:
+            return f"{float(val) * 100:.1f}%"
+        except (TypeError, ValueError):
+            return "—"
+
+    def _num(val):
+        try:
+            return f"{float(val):.2f}"
+        except (TypeError, ValueError):
+            return "—"
+
+    def _qtr_trend(df, row_label):
+        """Latest value + QoQ change for a quarterly row, in ₹ Cr."""
+        if df is None or df.empty or row_label not in df.index:
+            return "—"
+        series = df.loc[row_label].dropna()
+        if series.empty:
+            return "—"
+        series = series.reindex(sorted(series.index, reverse=True))
+        latest = series.iloc[0] / 1e7
+        if len(series) < 2 or series.iloc[1] == 0:
+            return f"₹{latest:.0f} Cr (latest qtr)"
+        prev = series.iloc[1] / 1e7
+        change = (latest - prev) / abs(prev) * 100
+        return f"₹{latest:.0f} Cr ({change:+.1f}% QoQ)"
+
+    lines = []
+    for ticker in tickers:
+        basics = basics_by_ticker.get(ticker)
+        if not basics:
+            lines.append(f"{ticker}: fundamentals not available")
+            continue
+
+        info = basics.get("info") or {}
+        shareholding = basics.get("shareholding")
+        promoter_str = "—"
+        if shareholding is not None and not shareholding.empty and "Promoters" in shareholding.index:
+            vals = [v for v in shareholding.loc["Promoters"].tolist() if v and v != "—"]
+            if len(vals) >= 2:
+                promoter_str = f"{vals[-1]} (was {vals[0]} four quarters ago)"
+            elif vals:
+                promoter_str = vals[-1]
+
+        q_pl = basics.get("quarterly_pl")
+        revenue_str = _qtr_trend(q_pl, "Total Revenue")
+        profit_str = _qtr_trend(q_pl, "Net Income")
+
+        lines.append(
+            f"{ticker} | Promoter holding: {promoter_str} | "
+            f"Revenue: {revenue_str} | Net Profit: {profit_str} | "
+            f"ROE: {_pct(info.get('returnOnEquity'))} | "
+            f"D/E: {_num(info.get('debtToEquity'))} | "
+            f"P/E (TTM): {_num(info.get('trailingPE'))}"
+        )
+    return "\n".join(lines)
+
+
 def get_ai_recommendations(shortlist_df):
     """
     Sends the shortlist to xAI's Grok model and returns its commentary as
@@ -134,6 +219,7 @@ def get_ai_recommendations(shortlist_df):
     top_picks = top_picks_df["ticker"].tolist()
     shortlist_text = _format_shortlist(top_picks_df)
     news_text = _format_news(top_picks)
+    fundamentals_text = _format_fundamentals(top_picks)
 
     prompt = (
         "You are reviewing a mathematically pre-screened shortlist of NSE-listed "
@@ -145,19 +231,27 @@ def get_ai_recommendations(shortlist_df):
         "the specific signals that triggered the screen.\n\n"
         f"{NOTATION_NOTE}\n\n"
         f"Shortlist:\n{shortlist_text}\n\n"
+        f"Fundamentals for these stocks (source: yfinance + screener.in):\n{fundamentals_text}\n\n"
         f"Recent news headlines for these stocks:\n{news_text}\n\n"
         f"For all {len(top_picks)} stocks above ({', '.join(top_picks)}), write a "
         "concise professional trading note as a markdown bullet list (NOT "
-        "paragraphs of prose). Use a '### TICKER' heading for each stock, "
-        "followed by exactly 4 bullet points:\n"
-        "- **Why**: the confluence of signals (Fibonacci level, RSI, MACD, "
-        "volume, sector trend) that makes this a buy/sell candidate right now.\n"
+        "paragraphs of prose). Only write BUY (long) setups - never a sell or "
+        "short recommendation, even if some signals look bearish. Use a "
+        "'### TICKER' heading for each stock, followed by exactly 4 bullet "
+        "points:\n"
+        "- **Why**: the confluence of technical signals (Fibonacci level, RSI, "
+        "MACD, volume, sector trend) AND fundamentals (promoter holding trend, "
+        "revenue/profit growth, ROE, D/E, P/E) that makes this a buy candidate "
+        "right now. If the fundamentals are weak or deteriorating (falling "
+        "promoter holding, shrinking revenue/profit), say so explicitly as a "
+        "risk/caveat rather than ignoring it - a good chart on a weak business "
+        "is a lower-conviction buy, not a reason to invent a bullish story.\n"
         "- **Entry**: WHEN to enter - e.g. immediately at CMP, on a pullback to "
         "a specific level, or on a breakout above a specific level.\n"
         "- **Stop-Loss**: a specific level with a brief rationale.\n"
         "- **Take-Profit**: a specific target.\n\n"
         "Keep each bullet to 1-2 short sentences. Calibrate all levels for a "
-        "SWING TRADE with a 2-3 WEEK holding horizon (not an intraday or scalp "
+        "SWING TRADE with a 3-MONTH holding horizon (not an intraday or scalp "
         "trade) - use the given Fibonacci range, 52-week range, and current "
         "price action to justify the levels. If a news headline is material "
         "(e.g. earnings, regulatory action, M&A, guidance change), briefly "

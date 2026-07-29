@@ -15,25 +15,26 @@ SCORE FORMULA (max 100, computed in score_setup()):
         0 pts otherwise (mutually exclusive - only the nearest level counts)
 
   2. RSI extreme (max SCORE_RSI_EXTREME = 20):
-       20 pts if RSI(14) <= RSI_OVERSOLD or RSI(14) >= RSI_OVERBOUGHT
-        0 pts otherwise (neutral RSI)
+       20 pts if RSI(14) <= RSI_OVERSOLD (oversold - a buy signal)
+        0 pts otherwise (neutral RSI, or overbought - never scored, since
+            this app only ever surfaces buy calls, not sell/short calls)
 
   3. MACD crossover proximity (max SCORE_MACD_PROXIMITY = 28):
        28 pts if the MACD histogram is small AND shrinking relative to its
-            recent (20-bar) average magnitude - i.e. converging toward a
-            crossover
-        0 pts otherwise
+            recent (20-bar) average magnitude AND below zero - i.e.
+            converging toward a bullish crossover
+        0 pts otherwise (including a bearish-converging crossover, which is
+            never scored for the same buy-only reason as above)
 
   4. Volume confirmation (max SCORE_VOLUME = 15):
        15 pts if latest volume >= VOLUME_SURGE_RATIO x its 20-day average
         0 pts otherwise
 
   5. Sector trend alignment (max SCORE_SECTOR_TREND = 7, small/secondary):
-       7 pts if the stock's directional bias (bullish from an RSI-oversold
-            or bullish-converging-MACD signal; bearish from RSI-overbought
-            or bearish-converging-MACD) is confirmed by its sector's average
-            SECTOR_TREND_LOOKBACK_DAYS-day return moving the same direction
-            by at least SECTOR_TREND_THRESHOLD
+       7 pts if the stock's bullish bias (from an RSI-oversold or
+            bullish-converging-MACD signal) is confirmed by its sector's
+            average SECTOR_TREND_LOOKBACK_DAYS-day return also moving up by
+            at least SECTOR_TREND_THRESHOLD
         0 pts otherwise (neutral bias, or sector trend too small/opposing)
 
   Maximum = 30 + 20 + 28 + 15 + 7 = 100. Fibonacci (key level) and MACD
@@ -95,7 +96,7 @@ def score_setup(analysis, sector_trend_pct):
                 f"Fibonacci retracement level ({analysis['nearest_fib_price']:.2f}) of "
                 f"its {config.FIB_LOOKBACK_DAYS}-day range - 50%/61.8% retracements "
                 "often act as support or resistance, making this a "
-                "higher-probability reaction zone for a 2-3 week swing entry or exit."
+                "higher-probability reaction zone for a 3-month swing entry or exit."
             )
         else:
             score += config.SCORE_FIB_OTHER_LEVEL
@@ -108,6 +109,9 @@ def score_setup(analysis, sector_trend_pct):
             )
 
     # --- RSI (max 25) ----------------------------------------------------------
+    # Only the oversold (bullish/buy) side scores here - this app only ever
+    # surfaces buy calls, so an overbought reading is noted but never scored
+    # or framed as a sell/short trigger.
     rsi = analysis["rsi"]
     if rsi <= config.RSI_OVERSOLD:
         score += config.SCORE_RSI_EXTREME
@@ -119,13 +123,10 @@ def score_setup(analysis, sector_trend_pct):
             "common entry trigger for a swing long."
         )
     elif rsi >= config.RSI_OVERBOUGHT:
-        score += config.SCORE_RSI_EXTREME
-        bias = "bearish"
         reasons.append(
             f"RSI(14) is overbought at {rsi:.1f} (at or above the "
-            f"{config.RSI_OVERBOUGHT} threshold), suggesting buying momentum may be "
-            "overextended and the stock could be due for a pullback - relevant for "
-            "booking profits or a swing short."
+            f"{config.RSI_OVERBOUGHT} threshold) - no buy signal here, so this "
+            "does not contribute to the score."
         )
     else:
         reasons.append(
@@ -134,15 +135,15 @@ def score_setup(analysis, sector_trend_pct):
         )
 
     # --- MACD crossover proximity (max 20) --------------------------------------
-    if analysis["macd_crossover_proximity"]:
+    # Only a bullish-converging crossover (histogram below zero and shrinking
+    # toward it) scores - a bearish/downside convergence is not a buy signal.
+    if analysis["macd_crossover_proximity"] and analysis["macd_hist"] < 0:
         score += config.SCORE_MACD_PROXIMITY
-        direction = "bullish" if analysis["macd_hist"] < 0 else "bearish"
-        implication = "an upside reversal" if direction == "bullish" else "a downside reversal"
         if bias == "neutral":
-            bias = direction
+            bias = "bullish"
         reasons.append(
             f"MACD histogram ({analysis['macd_hist']:.3f}) is converging toward a "
-            f"{direction} crossover, which could signal {implication} forming."
+            "bullish crossover, which could signal an upside reversal forming."
         )
 
     # --- Volume confirmation (max 15) --------------------------------------------
@@ -169,12 +170,6 @@ def score_setup(analysis, sector_trend_pct):
         reasons.append(
             f"The {sector} sector is up {sector_trend_pct * 100:.1f}% over the last "
             f"{lookback} sessions, a tailwind that supports this stock's bullish setup."
-        )
-    elif bias == "bearish" and sector_trend_pct <= -config.SECTOR_TREND_THRESHOLD:
-        score += config.SCORE_SECTOR_TREND
-        reasons.append(
-            f"The {sector} sector is down {abs(sector_trend_pct) * 100:.1f}% over the "
-            f"last {lookback} sessions, reinforcing this stock's bearish setup."
         )
     else:
         direction_word = "up" if sector_trend_pct >= 0 else "down"

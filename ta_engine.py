@@ -162,11 +162,71 @@ def nearest_fib_level(price, levels):
     return nearest_name, nearest_price, distance_pct
 
 
+def detect_swing_legs(df, lookback_days=config.SWING_LOOKBACK_DAYS, reversal_pct=config.SWING_REVERSAL_PCT):
+    """
+    Zigzag pivot scan over the last `lookback_days` closes: a new pivot is
+    confirmed whenever price reverses by at least `reversal_pct` from the
+    running extreme since the last confirmed pivot. This turns raw daily
+    noise into a small number of genuine up/down legs.
+
+    Returns a list of (direction, magnitude_pct) tuples, e.g.
+    [("up", 0.082), ("down", 0.045), ...], oldest first. The final leg (still
+    forming as of the last close) is NOT included - only completed legs.
+    """
+    closes = df["Close"].tail(lookback_days)
+    if len(closes) < 5:
+        return []
+
+    legs = []
+    pivot_price = float(closes.iloc[0])
+    direction = None  # "up" or "down" since the last confirmed pivot
+    extreme_price = pivot_price
+
+    for price in closes.iloc[1:]:
+        price = float(price)
+        if direction is None:
+            if price >= pivot_price * (1 + reversal_pct):
+                direction, extreme_price = "up", price
+            elif price <= pivot_price * (1 - reversal_pct):
+                direction, extreme_price = "down", price
+            continue
+
+        if direction == "up":
+            if price > extreme_price:
+                extreme_price = price
+            elif price <= extreme_price * (1 - reversal_pct):
+                legs.append(("up", (extreme_price - pivot_price) / pivot_price))
+                pivot_price, direction, extreme_price = extreme_price, "down", price
+        else:
+            if price < extreme_price:
+                extreme_price = price
+            elif price >= extreme_price * (1 + reversal_pct):
+                legs.append(("down", (pivot_price - extreme_price) / pivot_price))
+                pivot_price, direction, extreme_price = extreme_price, "up", price
+
+    return legs
+
+
+def median_up_swing_pct(df, lookback_days=config.SWING_LOOKBACK_DAYS, reversal_pct=config.SWING_REVERSAL_PCT):
+    """
+    Median magnitude of this stock's completed up-legs (low-to-high zigzag
+    moves) over the lookback window - a "track record" read on whether this
+    stock, when it does swing up, typically moves far enough to be worth a
+    swing trade. Returns 0.0 if no up-legs were detected in the window.
+    """
+    up_legs = [mag for direction, mag in detect_swing_legs(df, lookback_days, reversal_pct) if direction == "up"]
+    if not up_legs:
+        return 0.0
+    return float(np.median(up_legs))
+
+
 def macd_crossover_proximity(df):
     """
     Returns True if the MACD histogram is small relative to its recent
     magnitude AND still shrinking - i.e. the MACD and signal lines are
-    converging toward a crossover.
+    converging toward a crossover. This is a PREDICTIVE signal (a crossover
+    hasn't happened yet) - used for descriptive text only, not scoring; see
+    macd_recent_bullish_crossover() for the confirmed version used to score.
     """
     hist = df["MACD_HIST"].dropna()
     if len(hist) < 10:
@@ -182,6 +242,38 @@ def macd_crossover_proximity(df):
     is_small = abs(latest) < recent_avg_abs * config.MACD_CROSSOVER_PROXIMITY_FACTOR
     is_converging = abs(latest) < abs(prev)
     return bool(is_small and is_converging)
+
+
+def macd_recent_bullish_crossover(df, lookback=config.MACD_CROSSOVER_LOOKBACK_DAYS):
+    """
+    Returns how many sessions ago MACD actually crossed ABOVE its Signal
+    line (0 = today), scanning back up to `lookback` sessions, or None if no
+    such crossover occurred in that window - i.e. a CONFIRMED reversal, not
+    a "getting close" prediction. Used to score MACD (see strategy.py).
+    """
+    diff = (df["MACD"] - df["MACD_SIGNAL"]).dropna().tail(lookback + 1)
+    for i in range(len(diff) - 1, 0, -1):
+        prev_val, curr_val = diff.iloc[i - 1], diff.iloc[i]
+        if prev_val == 0:
+            continue
+        if prev_val < 0 and curr_val > 0:
+            return len(diff) - 1 - i
+    return None
+
+
+def macd_histogram_scale(df, window=20):
+    """
+    This stock's own typical MACD histogram magnitude (mean |histogram|
+    over the last `window` sessions) - a scale-normalized reference for
+    "how big a histogram/MACD-line reading is large FOR THIS STOCK", used to
+    judge whether a bullish crossover happened while MACD was still near
+    zero (a genuine reversal) or already well above zero (a mid-uptrend
+    pullback-and-continue, where much of the move is already behind you).
+    """
+    hist = df["MACD_HIST"].dropna().tail(window)
+    if hist.empty:
+        return 0.0
+    return float(hist.abs().mean())
 
 
 def describe_macd_pattern(df, lookback=10):
@@ -384,8 +476,14 @@ def analyze_ticker(ticker):
         levels, peak, trough = calculate_fibonacci_levels(df)
         level_name, level_price, distance_pct = nearest_fib_level(close, levels)
         macd_near_cross = macd_crossover_proximity(df)
+        macd_bullish_crossover_bars_ago = macd_recent_bullish_crossover(df)
+        macd_hist_scale = macd_histogram_scale(df)
         macd_pattern = describe_macd_pattern(df)
+        median_up_swing = median_up_swing_pct(df)
         macd_hist_direction = "up" if float(latest["MACD_HIST"]) >= float(prev["MACD_HIST"]) else "down"
+        macd_hist_5d = df["MACD_HIST"].dropna().tail(5)
+        macd_hist_rising_5d = bool(len(macd_hist_5d) >= 2 and macd_hist_5d.iloc[-1] > macd_hist_5d.iloc[0])
+        rsi_direction = "up" if float(latest["RSI"]) >= float(prev["RSI"]) else "down"
         week52_high, week52_low, pct_from_52w_high = calculate_52week_range(df, close)
         latest_volume, avg_volume_20, volume_ratio = calculate_volume_metrics(df)
         buy_pct, sell_pct = calculate_buy_sell_pressure(df)
@@ -397,19 +495,24 @@ def analyze_ticker(ticker):
             "sector": config.SECTOR_MAP.get(ticker, "Other"),
             "close": close,
             "rsi": float(latest["RSI"]),
+            "rsi_direction": rsi_direction,
             "macd_line": float(latest["MACD"]),
             "macd_signal": float(latest["MACD_SIGNAL"]),
             "macd_hist": float(latest["MACD_HIST"]),
             "macd_hist_direction": macd_hist_direction,
+            "macd_hist_rising_5d": macd_hist_rising_5d,
             "nearest_fib_level": level_name,
             "nearest_fib_price": float(level_price),
             "fib_distance_pct": float(distance_pct),
             "fib_high": peak,
             "fib_low": trough,
+            "median_up_swing_pct": median_up_swing,
             "week52_high": week52_high,
             "week52_low": week52_low,
             "pct_from_52w_high": pct_from_52w_high,
             "macd_crossover_proximity": macd_near_cross,
+            "macd_bullish_crossover_bars_ago": macd_bullish_crossover_bars_ago,
+            "macd_hist_scale": macd_hist_scale,
             "macd_pattern": macd_pattern,
             "latest_volume": latest_volume,
             "avg_volume_20": avg_volume_20,

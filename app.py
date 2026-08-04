@@ -1104,19 +1104,25 @@ with tab_shortlist:
     if _scan_ts:
         st.caption(f"Last updated: {_scan_ts}")
 
-    with st.expander("📐 How the score is calculated (max 100)", expanded=False):
+    with st.expander(
+        f"📐 How the score is calculated (max "
+        f"{config.SCORE_FIB_KEY_LEVEL + config.SCORE_RSI_EXTREME + config.SCORE_MACD_PROXIMITY + config.SCORE_SWING_POTENTIAL + config.SCORE_SECTOR_TREND})",
+        expanded=False,
+    ):
         st.markdown(
             f"""
 | # | Component | Max points | Awarded when... |
 |---|---|---|---|
 | 1 | Fibonacci proximity | **{config.SCORE_FIB_KEY_LEVEL}** | Price is within {config.FIB_PROXIMITY_PCT * 100:.0f}% of a **key** level (50% / 61.8%) |
 | 1b | (or) | **{config.SCORE_FIB_OTHER_LEVEL}** | ...or within {config.FIB_PROXIMITY_PCT * 100:.0f}% of any other level (0% / 23.6% / 38.2% / 100%) |
-| 2 | RSI extreme | **{config.SCORE_RSI_EXTREME}** | RSI(14) <= {config.RSI_OVERSOLD} (oversold) or >= {config.RSI_OVERBOUGHT} (overbought) |
-| 3 | MACD crossover proximity | **{config.SCORE_MACD_PROXIMITY}** | MACD histogram is small and shrinking - converging toward a crossover |
-| 4 | Volume confirmation | **{config.SCORE_VOLUME}** | Latest volume >= {config.VOLUME_SURGE_RATIO}x its {config.VOLUME_AVG_WINDOW}-day average |
-| 5 | Sector trend alignment | **{config.SCORE_SECTOR_TREND}** | Stock's bullish/bearish bias is confirmed by its sector's {config.SECTOR_TREND_LOOKBACK_DAYS}-day average return moving >= {config.SECTOR_TREND_THRESHOLD * 100:.1f}% the same direction |
-| | **Total (best case)** | **{config.SCORE_FIB_KEY_LEVEL + config.SCORE_RSI_EXTREME + config.SCORE_MACD_PROXIMITY + config.SCORE_VOLUME + config.SCORE_SECTOR_TREND}** | 1 (key level) + 2 + 3 + 4 + 5 |
+| 2 | RSI recovering | **{config.SCORE_RSI_EXTREME}** | RSI(14) < 50 **and** rising vs. the previous session - full points at <= {config.RSI_OVERSOLD}, tapering to 0 as RSI approaches 50. A low-but-still-falling RSI scores 0 (not a confirmed reversal). |
+| 3 | MACD confirmed crossover | **{config.SCORE_MACD_PROXIMITY}** | MACD **actually crossed above** Signal within the last {config.MACD_CROSSOVER_LOOKBACK_DAYS} sessions - full points today, tapering as it ages. Merely "converging toward" a crossover that hasn't happened yet scores 0. |
+| 4 | Swing potential | **{config.SCORE_SWING_POTENTIAL}** | Blend of room to the recent swing high (primary) and this stock's own median historical up-leg size over the last {config.SWING_LOOKBACK_DAYS} sessions (secondary) - full points at/above a {config.SWING_TARGET_PCT * 100:.1f}% blended figure. Independent of RSI/MACD - asks whether the stock can even deliver a worthwhile move. |
+| 5 | Sector trend alignment | **{config.SCORE_SECTOR_TREND}** | Stock's bullish bias is confirmed by its sector's {config.SECTOR_TREND_LOOKBACK_DAYS}-day average return moving >= {config.SECTOR_TREND_THRESHOLD * 100:.1f}% the same direction |
+| | **Total (best case)** | **{config.SCORE_FIB_KEY_LEVEL + config.SCORE_RSI_EXTREME + config.SCORE_MACD_PROXIMITY + config.SCORE_SWING_POTENTIAL + config.SCORE_SECTOR_TREND}** | 1 (key level) + 2 + 3 + 4 + 5 |
 
+Volume is shown for context but is **not scored** - a volume spike with no
+RSI/MACD signal behind it was letting weak setups qualify on volume alone.
 Items 1/1b are mutually exclusive (only the nearest Fib level counts). Item 5
 is intentionally a small/secondary factor - sector trend never decides a
 setup on its own, it only adds a bit of conviction when it agrees with the

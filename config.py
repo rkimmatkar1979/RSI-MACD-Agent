@@ -101,7 +101,12 @@ MACD_SLOW = 26
 MACD_SIGNAL = 9
 # Histogram is "near a crossover" when its absolute value has shrunk below
 # this fraction of its own recent (20-bar) average AND is still shrinking.
+# Used for descriptive text only - NOT for scoring (see MACD_CROSSOVER_LOOKBACK_DAYS).
 MACD_CROSSOVER_PROXIMITY_FACTOR = 0.15
+# How many recent sessions to scan for an actual (confirmed) bullish MACD/
+# Signal crossover for scoring purposes - a crossover that "might be coming"
+# doesn't count, only one that has already happened within this window.
+MACD_CROSSOVER_LOOKBACK_DAYS = 10
 
 # Fibonacci retracement
 # 90 trading days (~4.5 months) gives a swing-relevant peak/trough window.
@@ -121,18 +126,33 @@ BUY_SELL_PRESSURE_WINDOW = 20          # sessions to look back
 SECTOR_TREND_LOOKBACK_DAYS = 10        # ~2 trading weeks
 SECTOR_TREND_THRESHOLD = 0.015         # 1.5% minimum move for bonus to apply
 
+# Swing potential - is this stock actually capable of a worthwhile swing-
+# trade move, regardless of whether RSI/MACD are currently confirming a
+# reversal? Blends (a) room between current price and the recent swing high
+# (the realistic near-term target) with (b) a smaller weighting toward this
+# stock's own recent swing-leg history (median up-leg size via a zigzag scan)
+# - "possibility" leads, "track record" is mixed in as a secondary check.
+SWING_LOOKBACK_DAYS = 63               # ~3 trading months
+SWING_REVERSAL_PCT = 0.04              # 4% reversal to count as a new zigzag pivot
+SWING_TARGET_PCT = 0.075               # 7.5% (midpoint of a 7-8% target) = full credit
+SWING_POSSIBILITY_WEIGHT = 0.6         # weight on room-to-target (current setup)
+SWING_TRACK_RECORD_WEIGHT = 0.4        # weight on median historical up-leg size
+
 # ---------------------------------------------------------------------------
 # Shortlist Tab
 # ---------------------------------------------------------------------------
-# Score weights sum to 100 for the best-case combination:
-#   key Fib (30) + RSI extreme (20) + MACD proximity (28)
-#   + volume surge (15) + sector trend (7) = 100
+# Score weights sum to 105 for the best-case combination:
+#   key Fib (30) + RSI recovering (20) + confirmed MACD crossover (28)
+#   + swing potential (20) + sector trend (7) = 105
 # Fibonacci and MACD are primary drivers; sector trend is secondary by design.
+# Volume is NOT scored (shown as context only, see strategy.score_setup).
 SCORE_FIB_KEY_LEVEL = 30
 SCORE_FIB_OTHER_LEVEL = 15
 SCORE_RSI_EXTREME = 20
-SCORE_MACD_PROXIMITY = 28
+SCORE_MACD_PROXIMITY = 28              # confirmed crossover (tapered + extension-discounted)
+SCORE_MACD_EARLY = 14                  # still below Signal but converging - early/watch, half weight
 SCORE_VOLUME = 15
+SCORE_SWING_POTENTIAL = 20
 SCORE_SECTOR_TREND = 7
 
 SHORTLIST_MAX_SIZE = 13

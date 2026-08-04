@@ -6,7 +6,7 @@ Nifty 100 plus Gold/Silver) and scores every ticker. The shortlist is the
 SHORTLIST_MAX_SIZE highest-scoring Nifty 100 stocks PLUS Gold and Silver
 (TATAGOLD.NS / TATASILV.NS), which are always included regardless of score.
 
-SCORE FORMULA (max 100, computed in score_setup()):
+SCORE FORMULA (max 105, computed in score_setup()):
 
   1. Fibonacci proximity (max SCORE_FIB_KEY_LEVEL = 30):
        30 pts if price is within FIB_PROXIMITY_PCT of a KEY level (50%/61.8%)
@@ -14,32 +14,49 @@ SCORE FORMULA (max 100, computed in score_setup()):
             other level (0%/23.6%/38.2%/100%)
         0 pts otherwise (mutually exclusive - only the nearest level counts)
 
-  2. RSI extreme (max SCORE_RSI_EXTREME = 20):
-       20 pts if RSI(14) <= RSI_OVERSOLD (oversold - a buy signal)
-        0 pts otherwise (neutral RSI, or overbought - never scored, since
-            this app only ever surfaces buy calls, not sell/short calls)
+  2. RSI recovering (max SCORE_RSI_EXTREME = 20):
+       Scores ONLY when RSI(14) < 50 AND rising vs. the previous session -
+       a low-but-still-falling RSI is not a confirmed reversal, so it earns
+       nothing; the "rising" check is a gate, not its own graduated factor.
+       Once gated in, the point value is driven by the RSI snapshot itself:
+       full 20 pts at RSI <= RSI_OVERSOLD, tapering linearly to 0 pts as RSI
+       approaches 50 - so the snapshot value (how oversold) carries most of
+       the weight, and direction only confirms whether it counts at all.
+        0 pts if RSI >= 50, or if RSI < 50 but still falling
 
-  3. MACD crossover proximity (max SCORE_MACD_PROXIMITY = 28):
-       28 pts if the MACD histogram is small AND shrinking relative to its
-            recent (20-bar) average magnitude AND below zero - i.e.
-            converging toward a bullish crossover
-        0 pts otherwise (including a bearish-converging crossover, which is
-            never scored for the same buy-only reason as above)
+  3. MACD confirmed bullish crossover (max SCORE_MACD_PROXIMITY = 28):
+       Scores ONLY when MACD has ACTUALLY crossed above its Signal line
+       within the last MACD_CROSSOVER_LOOKBACK_DAYS sessions - "converging
+       toward" a crossover that hasn't happened yet is a prediction, not a
+       confirmed reversal, so it earns nothing (same confirm-don't-predict
+       principle as RSI above). Full 28 pts for a crossover today, tapering
+       linearly to 0 pts the further back (up to the lookback window) it
+       occurred - a fresher confirmation carries more weight.
+        0 pts if no bullish crossover occurred in that window
 
-  4. Volume confirmation (max SCORE_VOLUME = 15):
-       15 pts if latest volume >= VOLUME_SURGE_RATIO x its 20-day average
-        0 pts otherwise
+  4. Swing potential (max SCORE_SWING_POTENTIAL = 20):
+       Independent of whether RSI/MACD are confirming a reversal right now -
+       asks whether the stock is even CAPABLE of a worthwhile (7-8%+) swing
+       move. Graduated (not gated), blending two things: room between
+       current price and the recent swing high (SWING_POSSIBILITY_WEIGHT,
+       primary) and this stock's own median historical up-leg size via a
+       zigzag scan over SWING_LOOKBACK_DAYS (SWING_TRACK_RECORD_WEIGHT,
+       secondary "track record" check). Full credit at/above SWING_TARGET_PCT,
+       scaling down below that.
 
   5. Sector trend alignment (max SCORE_SECTOR_TREND = 7, small/secondary):
-       7 pts if the stock's bullish bias (from an RSI-oversold or
-            bullish-converging-MACD signal) is confirmed by its sector's
+       7 pts if the stock's bullish bias (from an RSI-recovering or
+            confirmed-MACD-crossover signal) is confirmed by its sector's
             average SECTOR_TREND_LOOKBACK_DAYS-day return also moving up by
             at least SECTOR_TREND_THRESHOLD
         0 pts otherwise (neutral bias, or sector trend too small/opposing)
 
-  Maximum = 30 + 20 + 28 + 15 + 7 = 100. Fibonacci (key level) and MACD
-  crossover proximity are the two largest components - the primary drivers
-  of the score.
+  Maximum = 30 + 20 + 28 + 20 + 7 = 105. Fibonacci (key level) and MACD
+  confirmed crossover are the two largest components - the primary drivers
+  of the score. Volume is NOT scored (see score_setup) - it's shown as
+  descriptive context only, since a volume spike with no RSI/MACD signal
+  behind it was letting weak setups qualify for the shortlist on volume
+  alone.
 
 Every ticker also gets baseline descriptive context (volume vs. its 20-day
 average, 52-week high proximity, sector trend, and a one-line MACD trend
@@ -108,19 +125,35 @@ def score_setup(analysis, sector_trend_pct):
                 "watching for a price reaction."
             )
 
-    # --- RSI (max 25) ----------------------------------------------------------
-    # Only the oversold (bullish/buy) side scores here - this app only ever
-    # surfaces buy calls, so an overbought reading is noted but never scored
-    # or framed as a sell/short trigger.
+    # --- RSI (max SCORE_RSI_EXTREME) ---------------------------------------------
+    # Scores ONLY when RSI is below neutral (50) AND rising vs the previous
+    # session - a low-but-still-falling RSI isn't a confirmed reversal, just
+    # momentum that hasn't bottomed yet, so it earns nothing. A low-and-rising
+    # RSI confirms a recovery may be underway. That rising check is a gate,
+    # not an independently graduated factor - once it's met, the point value
+    # is driven primarily by the RSI snapshot itself (full credit at/below
+    # RSI_OVERSOLD, tapering linearly to 0 as RSI approaches 50), so the
+    # snapshot value carries most of the weight and the "swing" (direction)
+    # only confirms whether the snapshot counts at all.
     rsi = analysis["rsi"]
-    if rsi <= config.RSI_OVERSOLD:
-        score += config.SCORE_RSI_EXTREME
+    rsi_rising = analysis["rsi_direction"] == "up"
+    if rsi < 50 and rsi_rising:
+        if rsi <= config.RSI_OVERSOLD:
+            rsi_score = config.SCORE_RSI_EXTREME
+        else:
+            rsi_score = config.SCORE_RSI_EXTREME * (50 - rsi) / (50 - config.RSI_OVERSOLD)
+        score += rsi_score
         bias = "bullish"
         reasons.append(
-            f"RSI(14) is oversold at {rsi:.1f} (at or below the "
-            f"{config.RSI_OVERSOLD} threshold), suggesting selling pressure may be "
-            "exhausted and the stock could be due for a short-term bounce - a "
+            f"RSI(14) is at {rsi:.1f} and rising - below neutral (50) with "
+            "upward momentum, suggesting a recovery off a low is underway, a "
             "common entry trigger for a swing long."
+        )
+    elif rsi < 50:
+        reasons.append(
+            f"RSI(14) is at {rsi:.1f} - below neutral but still falling, so "
+            "this isn't a confirmed reversal yet and doesn't contribute to "
+            "the score."
         )
     elif rsi >= config.RSI_OVERBOUGHT:
         reasons.append(
@@ -130,36 +163,119 @@ def score_setup(analysis, sector_trend_pct):
         )
     else:
         reasons.append(
-            f"RSI(14) is at {rsi:.1f} - neutral territory, with no oversold/"
-            "overbought extreme currently in play."
+            f"RSI(14) is at {rsi:.1f} - neutral-to-elevated territory, with no "
+            "oversold-and-recovering setup currently in play."
         )
 
-    # --- MACD crossover proximity (max 20) --------------------------------------
-    # Only a bullish-converging crossover (histogram below zero and shrinking
-    # toward it) scores - a bearish/downside convergence is not a buy signal.
-    if analysis["macd_crossover_proximity"] and analysis["macd_hist"] < 0:
-        score += config.SCORE_MACD_PROXIMITY
+    # --- MACD (max SCORE_MACD_PROXIMITY) -----------------------------------------
+    # Three states, not a single on/off check:
+    #   1. Below Signal but converging (histogram shrinking toward zero) -
+    #      an early, not-yet-confirmed setup worth watching. Smaller credit
+    #      (SCORE_MACD_EARLY) since the reversal hasn't happened yet.
+    #   2. Actually crossed above Signal within MACD_CROSSOVER_LOOKBACK_DAYS -
+    #      a CONFIRMED reversal, not a prediction. Full weight for a crossover
+    #      today, tapering off the further back it happened.
+    #   3. Already crossed but MACD is well above the zero line - a
+    #      mid-uptrend pullback-and-continue rather than a fresh reversal,
+    #      much of the move may already be behind you, so state 2's credit
+    #      gets discounted the further above zero it already is (relative to
+    #      this stock's own typical histogram magnitude, macd_hist_scale -
+    #      "how far above zero counts as too far" is per-stock, not fixed).
+    bars_ago = analysis["macd_bullish_crossover_bars_ago"]
+    if bars_ago is not None:
+        hist_scale = analysis["macd_hist_scale"]
+        if hist_scale > 0:
+            extension_factor = max(0.0, 1 - max(0.0, analysis["macd_line"]) / hist_scale)
+        else:
+            extension_factor = 1.0 if analysis["macd_line"] <= 0 else 0.0
+        macd_score = (
+            config.SCORE_MACD_PROXIMITY
+            * (1 - bars_ago / config.MACD_CROSSOVER_LOOKBACK_DAYS)
+            * extension_factor
+        )
+        score += macd_score
+        if bias == "neutral":
+            bias = "bullish"
+        when = "today" if bars_ago == 0 else f"{bars_ago} session(s) ago"
+        if extension_factor < 0.5:
+            extension_note = (
+                " - though MACD is already well above zero, so this looks more like "
+                "a mid-uptrend pullback-and-continue than a fresh reversal, discounted "
+                "accordingly."
+            )
+        else:
+            extension_note = ""
+        reasons.append(
+            f"MACD crossed above its Signal line (confirmed bullish crossover) "
+            f"{when}, an actual reversal rather than an anticipated one{extension_note}"
+        )
+    elif analysis["macd_hist"] < 0 and analysis["macd_hist_rising_5d"]:
+        score += config.SCORE_MACD_EARLY
         if bias == "neutral":
             bias = "bullish"
         reasons.append(
-            f"MACD histogram ({analysis['macd_hist']:.3f}) is converging toward a "
-            "bullish crossover, which could signal an upside reversal forming."
+            f"MACD is still below its Signal line but the histogram "
+            f"({analysis['macd_hist']:.3f}) has been rising over the last 5 "
+            "sessions - an early, not-yet-confirmed setup worth watching for "
+            "a crossover, so it earns partial credit."
+        )
+    else:
+        reasons.append(
+            f"No confirmed or converging bullish MACD setup in the last "
+            f"{config.MACD_CROSSOVER_LOOKBACK_DAYS} sessions - {analysis['macd_pattern'].split('. ')[0].strip()}."
         )
 
-    # --- Volume confirmation (max 15) --------------------------------------------
+    # --- Swing potential (max SCORE_SWING_POTENTIAL) -----------------------------
+    # Independent of whether RSI/MACD are confirming a reversal right now -
+    # this asks whether the stock is even CAPABLE of a worthwhile swing-trade
+    # move. Blends two things (graduated, not gated - no cliff to 0):
+    #   - "possibility": room between current price and the recent swing high
+    #     (the realistic near-term target), weighted primary
+    #   - "track record": this stock's own median historical up-leg size
+    #     (zigzag scan over SWING_LOOKBACK_DAYS), weighted secondary
+    # Full credit at/above SWING_TARGET_PCT (the 7-8% target), scaling down
+    # below that - not a hard requirement, just a smaller contribution.
+    room_to_target_pct = (
+        max(0.0, (analysis["fib_high"] - analysis["close"]) / analysis["close"])
+        if analysis["close"] else 0.0
+    )
+    track_record_pct = analysis["median_up_swing_pct"]
+    swing_potential_pct = (
+        config.SWING_POSSIBILITY_WEIGHT * room_to_target_pct
+        + config.SWING_TRACK_RECORD_WEIGHT * track_record_pct
+    )
+    swing_score = min(
+        config.SCORE_SWING_POTENTIAL,
+        config.SCORE_SWING_POTENTIAL * swing_potential_pct / config.SWING_TARGET_PCT,
+    )
+    score += swing_score
+    verdict = (
+        "clears the bar for a worthwhile swing" if swing_potential_pct >= config.SWING_TARGET_PCT
+        else "below the bar, so even a confirmed reversal here may not deliver a full swing-trade move"
+    )
+    reasons.append(
+        f"Swing potential: {room_to_target_pct * 100:.1f}% room to the recent swing high, "
+        f"blended with a {track_record_pct * 100:.1f}% median historical up-leg over the last "
+        f"{config.SWING_LOOKBACK_DAYS} sessions, against a {config.SWING_TARGET_PCT * 100:.1f}% "
+        f"target - {verdict}."
+    )
+
+    # --- Volume (always included, informational only - not scored) --------------
+    # Volume surges were previously worth SCORE_VOLUME points, but that let
+    # a stock qualify for the shortlist on a volume spike alone even with no
+    # real RSI/MACD signal (see strategy discussion) - now purely descriptive.
     volume_ratio = analysis["volume_ratio"]
     if volume_ratio >= config.VOLUME_SURGE_RATIO:
-        score += config.SCORE_VOLUME
         reasons.append(
             f"Volume is running at {volume_ratio:.2f}x its "
             f"{config.VOLUME_AVG_WINDOW}-day average ({analysis['avg_volume_20']:,.0f} "
-            "shares), confirming the move with above-average participation."
+            "shares) - above-average participation, though volume alone doesn't "
+            "score a setup."
         )
     else:
         reasons.append(
             f"Volume is {volume_ratio:.2f}x its {config.VOLUME_AVG_WINDOW}-day average "
-            "- no unusual surge, so treat the move as lower-conviction until volume "
-            "confirms it."
+            "- no unusual surge."
         )
 
     # --- Sector trend alignment (max 10, small/secondary factor) -----------------

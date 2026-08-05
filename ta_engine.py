@@ -37,10 +37,16 @@ def is_market_open():
     return open_t <= now.time() <= close_t
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=config.PRICE_DATA_CACHE_TTL, show_spinner=False)
 def fetch_data(ticker, period=config.DATA_PERIOD, interval=config.DATA_INTERVAL):
     """
     Downloads OHLCV history for a ticker.
+
+    yfinance's daily bar for the current session updates live while the
+    market is open (not just yesterday's close) - cached for
+    PRICE_DATA_CACHE_TTL seconds (short, not the old 1 hour) so RSI/MACD/
+    etc. reflect genuinely current intraday price action rather than being
+    stale for up to an hour.
 
     Returns a DataFrame indexed by date with Open/High/Low/Close/Volume
     columns, or None if the data could not be fetched or is insufficient
@@ -134,7 +140,7 @@ def calculate_fibonacci_levels(df, lookback=config.FIB_LOOKBACK_DAYS):
     return levels, peak, trough
 
 
-@st.cache_data(ttl=3600, show_spinner="📊 Fetching chart data...")
+@st.cache_data(ttl=config.PRICE_DATA_CACHE_TTL, show_spinner="📊 Fetching chart data...")
 def get_chart_data(ticker):
     """
     Fetches OHLCV data and computes RSI/MACD/Fibonacci levels for a ticker

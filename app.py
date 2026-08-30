@@ -1575,12 +1575,17 @@ if can_use_admin_tools and ML_PREDICTIONS_TAB_ENABLED:
             if _diag is None:
                 st.warning("Could not load diagnostics for this model.")
             else:
-                m1, m2, m3, m4 = st.columns(4)
+                m1, m2, m3, m4, m5 = st.columns(5)
                 mean_auc = _diag.get("mean_auc")
+                baseline_auc = _diag.get("baseline_mean_auc")
                 m1.metric("Mean OOF AUC", f"{mean_auc:.3f}" if mean_auc is not None else "—")
-                m2.metric("Labeled rows", f"{_diag['n_rows']:,}")
-                m3.metric("Tickers", _diag.get("n_tickers") or "—")
-                m4.metric("Positive rate", f"{_diag['positive_rate']:.1%}")
+                m2.metric(
+                    "vs. logistic baseline", f"{baseline_auc:.3f}" if baseline_auc is not None else "—",
+                    help="A plain logistic regression on the same features - if XGBoost isn't clearing this by much, the ceiling is the features, not the model.",
+                )
+                m3.metric("Labeled rows", f"{_diag['n_rows']:,}")
+                m4.metric("Tickers", _diag.get("n_tickers") or "—")
+                m5.metric("Positive rate", f"{_diag['positive_rate']:.1%}")
 
                 st.write(
                     f"**Label:** {_diag.get('label_kind', 'absolute')} · "

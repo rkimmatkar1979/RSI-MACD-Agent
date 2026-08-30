@@ -55,6 +55,8 @@ VOLUME_AVG_WINDOW = config.VOLUME_AVG_WINDOW
 FUNDAMENTALS_LAG_DAYS = 45         # safety buffer past quarter-end before results are assumed public
 
 MOMENTUM_WINDOW = 20               # trading sessions - used for momentum_20d, sector- and market-relative momentum
+MOMENTUM_SHORT_WINDOW = 5
+MOMENTUM_LONG_WINDOW = 60
 VOLATILITY_WINDOW = 20
 SWING_TRACK_LOOKBACK_DAYS = config.SWING_LOOKBACK_DAYS   # 63 - "track record" window for the swing-potential rule component
 SWING_REVERSAL_PCT = config.SWING_REVERSAL_PCT            # 4% - zigzag pivot threshold, same as the rule engine
@@ -62,6 +64,22 @@ SWING_REVERSAL_PCT = config.SWING_REVERSAL_PCT            # 4% - zigzag pivot th
 MACD_STATE_OVEREXTENDED = 0
 MACD_STATE_CONVERGING = 1
 MACD_STATE_CROSSOVER = 2
+
+# Rule-engine score weights, reused here so rule_composite_score is driven
+# by the same tuned constants as strategy.score_setup() rather than a
+# second, drifting copy of the numbers.
+RULE_SCORE_FIB_KEY = config.SCORE_FIB_KEY_LEVEL
+RULE_SCORE_RSI = config.SCORE_RSI_EXTREME
+RULE_SCORE_MACD_CONFIRMED = config.SCORE_MACD_PROXIMITY
+RULE_SCORE_MACD_EARLY = config.SCORE_MACD_EARLY
+RULE_SCORE_SWING = config.SCORE_SWING_POTENTIAL
+RULE_SCORE_SECTOR = config.SCORE_SECTOR_TREND
+RULE_RSI_OVERSOLD = config.RSI_OVERSOLD
+RULE_FIB_PROXIMITY_PCT = config.FIB_PROXIMITY_PCT
+RULE_SWING_POSSIBILITY_WEIGHT = config.SWING_POSSIBILITY_WEIGHT
+RULE_SWING_TRACK_RECORD_WEIGHT = config.SWING_TRACK_RECORD_WEIGHT
+RULE_SWING_TARGET_PCT = config.SWING_TARGET_PCT
+RULE_SECTOR_TREND_THRESHOLD = config.SECTOR_TREND_THRESHOLD
 
 FEATURE_COLUMNS = [
     "rsi_14",
@@ -82,6 +100,16 @@ FEATURE_COLUMNS = [
     "median_up_swing_pct",
     "sector_relative_momentum_20d",
     "market_relative_momentum_20d",
+    # Round 2: more momentum horizons, cross-sectional percentile ranks
+    # (trees often generalize better from "cheap vs. peers today" than an
+    # absolute value), and the rule engine's own composite score fed in as
+    # a single feature - see _add_rule_composite_score().
+    "momentum_5d",
+    "momentum_60d",
+    "rsi_14_rank",
+    "momentum_20d_rank",
+    "volatility_20d_rank",
+    "rule_composite_score",
 ]
 
 
@@ -263,6 +291,8 @@ def _ticker_price_features(g):
     pct_618, pct_50 = _fib_distances(high, low, close)
     vol_ratio = _volume_ratio(volume)
     momentum_20d = _momentum(close)
+    momentum_5d = _momentum(close, MOMENTUM_SHORT_WINDOW)
+    momentum_60d = _momentum(close, MOMENTUM_LONG_WINDOW)
     volatility_20d = _volatility(close)
     room_to_swing_high = _room_to_swing_high(high, close)
     median_up_swing = _median_up_swing_pct(close)
@@ -278,6 +308,8 @@ def _ticker_price_features(g):
         "pct_dist_to_fib_50": pct_50.to_numpy(),
         "volume_vs_20d_avg": vol_ratio.to_numpy(),
         "momentum_20d": momentum_20d.to_numpy(),
+        "momentum_5d": momentum_5d.to_numpy(),
+        "momentum_60d": momentum_60d.to_numpy(),
         "volatility_20d": volatility_20d.to_numpy(),
         "room_to_swing_high_pct": room_to_swing_high.to_numpy(),
         "median_up_swing_pct": median_up_swing.to_numpy(),
@@ -310,6 +342,69 @@ def _add_market_relative_momentum(price_features, index_df):
     return df.drop(columns=["index_momentum_20d"])
 
 
+def _add_cross_sectional_ranks(price_features):
+    """
+    Daily percentile rank (0-1, low-to-high) of rsi_14 / momentum_20d /
+    volatility_20d across every ticker with a value that same date - trees
+    split on thresholds, and a fixed threshold on a raw value ("RSI < 35")
+    means something different in a hot market than a cold one; the rank
+    version ("cheapest 10% of the universe today") is regime-agnostic.
+    """
+    df = price_features.copy()
+    for col in ("rsi_14", "momentum_20d", "volatility_20d"):
+        df[f"{col}_rank"] = df.groupby("date")[col].rank(pct=True)
+    return df
+
+
+def _add_rule_composite_score(price_features):
+    """
+    Vectorized approximation of strategy.score_setup()'s composite rule
+    score (see strategy.py's module docstring for the original formula),
+    built from signals already computed above - handing the ML model the
+    same domain knowledge the rule-based screener uses, as a single input
+    it's free to weigh however the data supports.
+
+    Not a byte-for-byte replica of score_setup(): the live scorer checks 6
+    Fibonacci levels and this checks only the 2 "key" levels already
+    computed here (50%/61.8% - worth 30 of the rule score's 105 points and
+    called out in strategy.py's docstring as one of its two largest
+    components); MACD's per-stock "extension" discount is already folded
+    into macd_state's 3-way split here rather than recomputed from
+    macd_hist_scale separately; and swing potential's "room to target"
+    uses this module's 63-day rolling high (room_to_swing_high_pct)
+    instead of score_setup()'s 90-day Fibonacci peak. Close enough to be a
+    useful feature, not meant to reproduce the UI's exact point totals.
+    """
+    df = price_features.copy()
+
+    fib_hit = (df["pct_dist_to_fib_618"] <= RULE_FIB_PROXIMITY_PCT) | (df["pct_dist_to_fib_50"] <= RULE_FIB_PROXIMITY_PCT)
+    fib_score = np.where(fib_hit, RULE_SCORE_FIB_KEY, 0.0)
+
+    rsi_taper = ((50 - df["rsi_14"]) / (50 - RULE_RSI_OVERSOLD)).clip(lower=0, upper=1)
+    rsi_score = np.where(df["is_rsi_under_50_and_rising"] == 1, RULE_SCORE_RSI * rsi_taper, 0.0)
+
+    macd_taper = (1 - df["days_since_macd_crossover"] / MACD_CROSSOVER_LOOKBACK_DAYS).clip(lower=0, upper=1)
+    macd_score = np.select(
+        [df["macd_state"] == MACD_STATE_CROSSOVER, df["macd_state"] == MACD_STATE_CONVERGING],
+        [RULE_SCORE_MACD_CONFIRMED * macd_taper, RULE_SCORE_MACD_EARLY],
+        default=0.0,
+    )
+
+    swing_potential_pct = (
+        RULE_SWING_POSSIBILITY_WEIGHT * df["room_to_swing_high_pct"]
+        + RULE_SWING_TRACK_RECORD_WEIGHT * df["median_up_swing_pct"]
+    )
+    swing_score = (RULE_SCORE_SWING * swing_potential_pct / RULE_SWING_TARGET_PCT).clip(lower=0, upper=RULE_SCORE_SWING)
+
+    bullish_bias = (df["is_rsi_under_50_and_rising"] == 1) | df["macd_state"].isin([MACD_STATE_CROSSOVER, MACD_STATE_CONVERGING])
+    sector = df["ticker"].map(config.SECTOR_MAP).fillna("Other")
+    sector_avg_momentum = df.assign(_sector=sector).groupby(["date", "_sector"])["momentum_20d"].transform("mean")
+    sector_score = np.where(bullish_bias & (sector_avg_momentum >= RULE_SECTOR_TREND_THRESHOLD), RULE_SCORE_SECTOR, 0.0)
+
+    df["rule_composite_score"] = fib_score + rsi_score + macd_score + swing_score + sector_score
+    return df
+
+
 def build_price_features(price_df, index_df=None):
     """Price/volume/technical features only (no fundamentals) - see build_feature_matrix() for the full set."""
     required = {"ticker", "date", "open", "high", "low", "close", "volume"}
@@ -325,6 +420,8 @@ def build_price_features(price_df, index_df=None):
     features = pd.concat(parts, ignore_index=True)
     features = _add_sector_relative_momentum(features)
     features = _add_market_relative_momentum(features, index_df)
+    features = _add_cross_sectional_ranks(features)
+    features = _add_rule_composite_score(features)
     return features
 
 

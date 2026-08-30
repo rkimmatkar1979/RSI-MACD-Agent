@@ -21,8 +21,12 @@ import os
 import joblib
 import numpy as np
 import pandas as pd
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 from ml.features import FEATURE_COLUMNS
@@ -82,24 +86,49 @@ def _fit_one_fold(X_train, y_train):
     return model
 
 
+def _fit_logistic_baseline(X_train, y_train):
+    """
+    Simple linear baseline: median-impute (unlike XGBoost, sklearn's
+    LogisticRegression can't handle NaN natively), scale, then fit with
+    class_weight="balanced" (logistic's equivalent of scale_pos_weight).
+
+    Purpose isn't to compete with XGBoost - it's a diagnostic: if this
+    scores close to XGBoost's AUC, the ceiling is the FEATURES (there's
+    only so much linearly-decodable signal in them), not the model; if
+    XGBoost clears it by a wide margin, there's real nonlinear/interaction
+    structure the trees are finding that a linear model can't.
+    """
+    model = make_pipeline(
+        SimpleImputer(strategy="median"),
+        StandardScaler(),
+        LogisticRegression(class_weight="balanced", max_iter=1000),
+    )
+    model.fit(X_train, y_train)
+    return model
+
+
 def run_cross_validation(feature_df, label_col="target", feature_cols=FEATURE_COLUMNS):
     """
     Diagnostic pass: reports out-of-fold AUC across the purged,
-    chronological folds so overfitting is visible before the final model is
-    trained on the full dataset.
+    chronological folds (for both the real XGBoost model and a logistic
+    regression baseline, see _fit_logistic_baseline) so overfitting is
+    visible before the final model is trained on the full dataset.
 
-    Returns (fold_aucs, oof_df) - fold_aucs is the list of per-fold AUCs;
-    oof_df has one row per test-fold observation with columns
-    [ticker, date, y_true, y_pred_proba], concatenated across every fold's
-    (disjoint, chronological) test set - i.e. every prediction in oof_df
-    came from a model that never saw that row during training. This is
-    what precision_at_k() below needs: scoring the FINAL model on its own
-    training data would be optimistic, since it saw those labels.
+    Returns (fold_aucs, oof_df, baseline_fold_aucs) - fold_aucs is the
+    XGBoost per-fold AUC list; oof_df has one row per test-fold observation
+    with columns [ticker, date, y_true, y_pred_proba] from XGBoost,
+    concatenated across every fold's (disjoint, chronological) test set -
+    i.e. every prediction in oof_df came from a model that never saw that
+    row during training. This is what precision_at_k() below needs:
+    scoring the FINAL model on its own training data would be optimistic,
+    since it saw those labels. baseline_fold_aucs is the same per-fold AUC
+    list for the logistic baseline.
     """
     df = feature_df.sort_values("date").reset_index(drop=True)
     X, y = df[feature_cols], df[label_col]
 
     fold_aucs = []
+    baseline_fold_aucs = []
     oof_parts = []
     for fold, (train_idx, test_idx, n_purged) in enumerate(purged_time_series_splits(df["date"]), start=1):
         X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
@@ -114,8 +143,14 @@ def run_cross_validation(feature_df, label_col="target", feature_cols=FEATURE_CO
         proba = model.predict_proba(X_test)[:, 1]
         auc = roc_auc_score(y_test, proba)
         fold_aucs.append(auc)
+
+        baseline = _fit_logistic_baseline(X_train, y_train)
+        baseline_proba = baseline.predict_proba(X_test)[:, 1]
+        baseline_auc = roc_auc_score(y_test, baseline_proba)
+        baseline_fold_aucs.append(baseline_auc)
+
         print(f"[fold {fold}] train={len(X_train)} (purged {n_purged} rows) "
-              f"test={len(X_test)} AUC={auc:.4f}")
+              f"test={len(X_test)} AUC={auc:.4f} (logistic baseline={baseline_auc:.4f})")
 
         fold_out = df.loc[test_idx, ["ticker", "date"]].copy() if "ticker" in df.columns else pd.DataFrame(index=test_idx)
         fold_out["y_true"] = y_test.to_numpy()
@@ -124,13 +159,14 @@ def run_cross_validation(feature_df, label_col="target", feature_cols=FEATURE_CO
 
     if fold_aucs:
         print(f"Mean OOF AUC across {len(fold_aucs)} folds: {np.mean(fold_aucs):.4f} "
-              f"(+/- {np.std(fold_aucs):.4f})")
+              f"(+/- {np.std(fold_aucs):.4f}) | logistic baseline: {np.mean(baseline_fold_aucs):.4f} "
+              f"(+/- {np.std(baseline_fold_aucs):.4f})")
     else:
         print("No folds produced a valid AUC - check class balance / data volume.")
 
     oof_df = pd.concat(oof_parts, ignore_index=True) if oof_parts else pd.DataFrame(
         columns=["ticker", "date", "y_true", "y_pred_proba"])
-    return fold_aucs, oof_df
+    return fold_aucs, oof_df, baseline_fold_aucs
 
 
 def precision_at_k(oof_df, k_fracs=(0.05, 0.1, 0.2)):
@@ -212,7 +248,7 @@ def train_and_save_model(feature_df, model_path, label_col="target", feature_col
     print(f"Training on {len(df)} labeled rows ({df[label_col].mean():.1%} positive) "
           f"spanning {df['date'].min().date()} to {df['date'].max().date()}")
 
-    fold_aucs, oof_df = run_cross_validation(df, label_col=label_col, feature_cols=feature_cols)
+    fold_aucs, oof_df, baseline_fold_aucs = run_cross_validation(df, label_col=label_col, feature_cols=feature_cols)
 
     precision_stats = precision_at_k(oof_df)
     if precision_stats:
@@ -240,6 +276,8 @@ def train_and_save_model(feature_df, model_path, label_col="target", feature_col
         "fold_aucs": [float(a) for a in fold_aucs],
         "mean_auc": float(np.mean(fold_aucs)) if fold_aucs else None,
         "std_auc": float(np.std(fold_aucs)) if fold_aucs else None,
+        "baseline_fold_aucs": [float(a) for a in baseline_fold_aucs],
+        "baseline_mean_auc": float(np.mean(baseline_fold_aucs)) if baseline_fold_aucs else None,
         "feature_importance": {k: float(v) for k, v in importance.items()},
         "precision_at_k": precision_stats,
     }

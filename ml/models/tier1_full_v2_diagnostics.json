@@ -1,0 +1,57 @@
+{
+  "trained_at": "2026-08-30T17:06:49.248103+00:00",
+  "label_kind": "relative",
+  "n_rows": 340225,
+  "positive_rate": 0.4192872363876846,
+  "date_range": [
+    "2021-08-30",
+    "2026-08-25"
+  ],
+  "n_tickers": 302,
+  "fold_aucs": [
+    0.5090374270485355,
+    0.5182750924112361,
+    0.5094540588824547,
+    0.5228249201172598,
+    0.5169101213370345
+  ],
+  "mean_auc": 0.515300323959304,
+  "std_auc": 0.005319077652074348,
+  "feature_importance": {
+    "volatility_20d": 0.11318077147006989,
+    "pct_dist_to_fib_618": 0.10422053933143616,
+    "median_up_swing_pct": 0.08642946183681488,
+    "market_relative_momentum_20d": 0.08362963795661926,
+    "pct_dist_to_fib_50": 0.07959295064210892,
+    "room_to_swing_high_pct": 0.07593625783920288,
+    "momentum_20d": 0.07538473606109619,
+    "macd_state": 0.07474684715270996,
+    "rsi_14": 0.07208583503961563,
+    "sector_relative_momentum_20d": 0.0637366995215416,
+    "days_since_macd_crossover": 0.06365258991718292,
+    "volume_vs_20d_avg": 0.05894915387034416,
+    "is_rsi_under_50_and_rising": 0.04845453053712845,
+    "promoter_holding_quarterly_change": 0.0,
+    "profit_growth_yoy": 0.0
+  },
+  "precision_at_k": {
+    "top_5pct": {
+      "n": 14176,
+      "precision": 0.4450479683972912,
+      "base_rate": 0.42361738148984196,
+      "lift": 1.0505894891094385
+    },
+    "top_10pct": {
+      "n": 28352,
+      "precision": 0.44310806997742663,
+      "base_rate": 0.42361738148984196,
+      "lift": 1.046010124558716
+    },
+    "top_20pct": {
+      "n": 56704,
+      "precision": 0.4421910270880361,
+      "base_rate": 0.42361738148984196,
+      "lift": 1.0438453340438287
+    }
+  }
+}

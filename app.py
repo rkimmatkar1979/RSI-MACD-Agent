@@ -4,8 +4,10 @@ Streamlit dashboard for the Nifty 100 Swing Trading Agent.
 Run with:  streamlit run app.py
 """
 
+import glob
 import html
 import io
+import os
 import re
 
 import openpyxl
@@ -19,6 +21,7 @@ import config
 import db_handler
 import fundamentals
 from ai_analyst import get_ai_recommendations
+from ml.train import load_diagnostics
 from scheduler import is_market_open, run_pipeline
 from strategy import generate_shortlist
 from ta_engine import (
@@ -552,19 +555,28 @@ selected_rows = []
 
 TAB_SHORTLIST = "📋 Shortlist"
 TAB_CUSTOM = "🎯 Custom Analysis"
+TAB_ML = "🤖 ML Predictions"
 TAB_ANALYTICS = "📊 Analytics"
 TAB_ADMIN = "👑 Admin"
 _TAB_CONTAINER_KEYS = {
     TAB_SHORTLIST: "shortlist",
-    TAB_CUSTOM: "custom", TAB_ANALYTICS: "analytics", TAB_ADMIN: "admin",
+    TAB_CUSTOM: "custom", TAB_ML: "ml", TAB_ANALYTICS: "analytics", TAB_ADMIN: "admin",
 }
 
 # Analytics tab temporarily disabled - flip this back to True to restore it.
 ANALYTICS_TAB_ENABLED = False
 
+# ML Predictions is experimental research (see ml/) - offline backtest
+# diagnostics only, not wired into live trading decisions. Off by default;
+# flip to True locally to inspect it. Keep this False on any deployed/
+# production build until the model is actually validated.
+ML_PREDICTIONS_TAB_ENABLED = False
+
 tab_names = [TAB_SHORTLIST]
 if can_use_admin_tools:
     tab_names.append(TAB_CUSTOM)
+    if ML_PREDICTIONS_TAB_ENABLED:
+        tab_names.append(TAB_ML)
 if ANALYTICS_TAB_ENABLED:
     tab_names.append(TAB_ANALYTICS)
 if is_admin:
@@ -617,6 +629,7 @@ st.markdown(
 
 tab_shortlist = st.container(key="tab_shortlist")
 tab_custom = st.container(key="tab_custom") if can_use_admin_tools else None
+tab_ml = st.container(key="tab_ml") if (can_use_admin_tools and ML_PREDICTIONS_TAB_ENABLED) else None
 tab_analytics = st.container(key="tab_analytics") if ANALYTICS_TAB_ENABLED else None
 tab_admin = st.container(key="tab_admin") if is_admin else None
 
@@ -1524,6 +1537,79 @@ if can_use_admin_tools:
                 except Exception:
                     _result_area.empty()
                     st.error("Could not load analysis — please try again.")
+
+# ---------------------------------------------------------------------------
+# Tab: ML Predictions - experimental. Shows the latest offline backtest
+# results from ml/backfill.py (real-data AUC + feature importance), read
+# from the *_diagnostics.json files ml.train.train_and_save_model() saves
+# next to each model. This tab is read-only and display-only: nothing here
+# feeds the live Shortlist tab - that still runs entirely on the rule-based
+# score in strategy.py. It exists so ML experiments are visible without
+# re-running python -m ml.backfill from a terminal each time.
+# ---------------------------------------------------------------------------
+if can_use_admin_tools and ML_PREDICTIONS_TAB_ENABLED:
+    with tab_ml:
+        st.subheader("🤖 ML Predictions (experimental)")
+        st.caption(
+            "Offline research only — not wired into the live Shortlist. Run "
+            "`python -m ml.backfill` to (re)train and refresh these numbers."
+        )
+
+        _diagnostics_files = sorted(
+            glob.glob("ml/models/*_diagnostics.json"), key=lambda p: p, reverse=True,
+        ) if active_tab == TAB_ML else []
+
+        if not _diagnostics_files:
+            st.info(
+                "No trained model found yet. Run `python -m ml.backfill` from the "
+                "project root to train one and populate this tab."
+            )
+        else:
+            _labels = [os.path.basename(p).replace("_diagnostics.json", "") for p in _diagnostics_files]
+            _choice_idx = st.selectbox(
+                "Model run", options=range(len(_diagnostics_files)),
+                format_func=lambda i: _labels[i], key="ml_diag_choice",
+            )
+            _diag = load_diagnostics(_diagnostics_files[_choice_idx].replace("_diagnostics.json", ".joblib"))
+
+            if _diag is None:
+                st.warning("Could not load diagnostics for this model.")
+            else:
+                m1, m2, m3, m4 = st.columns(4)
+                mean_auc = _diag.get("mean_auc")
+                m1.metric("Mean OOF AUC", f"{mean_auc:.3f}" if mean_auc is not None else "—")
+                m2.metric("Labeled rows", f"{_diag['n_rows']:,}")
+                m3.metric("Tickers", _diag.get("n_tickers") or "—")
+                m4.metric("Positive rate", f"{_diag['positive_rate']:.1%}")
+
+                st.write(
+                    f"**Label:** {_diag.get('label_kind', 'absolute')} · "
+                    f"**Range:** {_diag['date_range'][0]} → {_diag['date_range'][1]} · "
+                    f"**Trained:** {_diag['trained_at'][:19].replace('T', ' ')} UTC"
+                )
+
+                if mean_auc is not None and 0.48 <= mean_auc <= 0.52:
+                    st.warning(
+                        "Mean AUC is essentially 0.50 (coin-flip) - this feature/label "
+                        "combination shows no detectable predictive edge on this data."
+                    )
+
+                st.markdown("**Per-fold AUC** (chronological, purged)")
+                fold_aucs = _diag.get("fold_aucs") or []
+                if fold_aucs:
+                    st.dataframe(
+                        pd.DataFrame({
+                            "fold": range(1, len(fold_aucs) + 1),
+                            "auc": [round(a, 4) for a in fold_aucs],
+                        }).set_index("fold"),
+                        use_container_width=True,
+                    )
+
+                st.markdown("**Feature importance** (final model, most relied-on first)")
+                importance = _diag.get("feature_importance") or {}
+                if importance:
+                    imp_series = pd.Series(importance).sort_values(ascending=False)
+                    st.bar_chart(imp_series)
 
 # ---------------------------------------------------------------------------
 # Tab 5: Admin - manage who can access this app (admins only)

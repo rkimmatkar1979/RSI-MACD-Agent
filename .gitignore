@@ -8,3 +8,10 @@ __pycache__/
 trading_agent.db
 
 .claude/
+
+# ML experiments: raw downloaded price/index cache and trained model
+# binaries are regenerable via `python -m ml.backfill` - not source, and
+# large/binary. The small *_diagnostics.json results are kept so the ML
+# Predictions tab has something to show without requiring a fresh run.
+ml/data/
+ml/models/*.joblib

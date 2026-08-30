@@ -10,3 +10,6 @@ Authlib
 httpx
 libsql-client
 openpyxl
+scikit-learn
+xgboost
+joblib

@@ -567,10 +567,10 @@ _TAB_CONTAINER_KEYS = {
 ANALYTICS_TAB_ENABLED = False
 
 # ML Predictions is experimental research (see ml/) - offline backtest
-# diagnostics only, not wired into live trading decisions. Off by default;
-# flip to True locally to inspect it. Keep this False on any deployed/
-# production build until the model is actually validated.
-ML_PREDICTIONS_TAB_ENABLED = False
+# diagnostics only, not wired into live trading decisions. Temporarily
+# flipped on to inspect v7 diagnostics locally - flip back to False before
+# any deployed/production build until the model is actually validated.
+ML_PREDICTIONS_TAB_ENABLED = True
 
 tab_names = [TAB_SHORTLIST]
 if can_use_admin_tools:
@@ -782,8 +782,28 @@ def _render_company_basics(basics):
         st.caption("Shareholding data not available.")
 
 
-def _render_chart_analysis(sel_row):
-    """Render the Fibonacci/RSI/MACD chart + breakdown for one shortlisted stock."""
+@st.cache_data(ttl=config.PRICE_DATA_CACHE_TTL, show_spinner="Scoring ML confidence...")
+def _score_shortlist_ml(tickers, model_path):
+    """Cached wrapper around ml.infer.score_tickers - ml/ itself stays free of
+    any Streamlit dependency (it's also run standalone via CLI), so caching
+    lives here at the app-facing layer, same as ta_engine.get_chart_data
+    wraps fetch_data."""
+    from ml.infer import score_tickers
+    try:
+        return score_tickers(tickers, model_path)
+    except Exception as e:
+        print(f"[app] ML live scoring failed: {e}")
+        return pd.DataFrame()
+
+
+def _render_chart_analysis(sel_row, tp_price=None, sl_price=None):
+    """Render the Fibonacci/RSI/MACD chart + breakdown for one shortlisted stock.
+
+    tp_price/sl_price are optional - when given (see the ML tab's Live ML
+    View), two extra solid horizontal lines are drawn alongside the
+    Fibonacci levels. Every other caller leaves these None and renders
+    exactly as before.
+    """
     chart_ticker = sel_row["ticker"]
 
     _prev_chart = st.session_state.get("_last_logged_chart")
@@ -879,6 +899,48 @@ def _render_chart_analysis(sel_row):
             annotation_borderwidth=1,
             row=1, col=1,
         )
+
+        # ML prediction zone - deliberately loud and NOT drawn from the same
+        # palette as the Fib grid (grey/orange/goldenrod/seagreen/blue) or
+        # the CMP line (magenta), since those bands already fill this same
+        # price region and a same-family color would visually disappear
+        # into them. Vivid neon green/red + a filled violet band between
+        # them, well above the Fib grid's line width/opacity, so this reads
+        # as a distinct overlay at a glance instead of "one more Fib line."
+        if tp_price is not None and sl_price is not None:
+            fig.add_hrect(
+                y0=sl_price, y1=tp_price,
+                fillcolor="rgba(142,68,173,0.16)",
+                line_width=0, row=1, col=1,
+            )
+        if tp_price is not None:
+            fig.add_hline(
+                y=tp_price,
+                line_dash="solid",
+                line_color="#00c853",
+                line_width=3.5,
+                annotation_text=f"🎯 ML Target: {tp_price:.2f}",
+                annotation_position="left",
+                annotation_font=dict(size=14, color="#ffffff"),
+                annotation_bgcolor="#00c853",
+                annotation_bordercolor="#00c853",
+                annotation_borderwidth=2,
+                row=1, col=1,
+            )
+        if sl_price is not None:
+            fig.add_hline(
+                y=sl_price,
+                line_dash="solid",
+                line_color="#ff1744",
+                line_width=3.5,
+                annotation_text=f"🛑 ML Stop: {sl_price:.2f}",
+                annotation_position="left",
+                annotation_font=dict(size=14, color="#ffffff"),
+                annotation_bgcolor="#ff1744",
+                annotation_bordercolor="#ff1744",
+                annotation_borderwidth=2,
+                row=1, col=1,
+            )
 
         # Mark the exact swing-high/swing-low bars the levels were measured
         # from - but only if they fall within the displayed window, since
@@ -1575,46 +1637,97 @@ if can_use_admin_tools and ML_PREDICTIONS_TAB_ENABLED:
             if _diag is None:
                 st.warning("Could not load diagnostics for this model.")
             else:
-                m1, m2, m3, m4, m5 = st.columns(5)
                 mean_auc = _diag.get("mean_auc")
-                baseline_auc = _diag.get("baseline_mean_auc")
-                m1.metric("Mean OOF AUC", f"{mean_auc:.3f}" if mean_auc is not None else "—")
-                m2.metric(
-                    "vs. logistic baseline", f"{baseline_auc:.3f}" if baseline_auc is not None else "—",
-                    help="A plain logistic regression on the same features - if XGBoost isn't clearing this by much, the ceiling is the features, not the model.",
-                )
-                m3.metric("Labeled rows", f"{_diag['n_rows']:,}")
-                m4.metric("Tickers", _diag.get("n_tickers") or "—")
-                m5.metric("Positive rate", f"{_diag['positive_rate']:.1%}")
 
-                st.write(
-                    f"**Label:** {_diag.get('label_kind', 'absolute')} · "
-                    f"**Range:** {_diag['date_range'][0]} → {_diag['date_range'][1]} · "
-                    f"**Trained:** {_diag['trained_at'][:19].replace('T', ' ')} UTC"
+                with st.expander("🔧 Model diagnostics (technical)", expanded=False):
+                    m1, m2, m3, m4, m5 = st.columns(5)
+                    baseline_auc = _diag.get("baseline_mean_auc")
+                    m1.metric("Mean OOF AUC", f"{mean_auc:.3f}" if mean_auc is not None else "—")
+                    m2.metric(
+                        "vs. logistic baseline", f"{baseline_auc:.3f}" if baseline_auc is not None else "—",
+                        help="A plain logistic regression on the same features - if XGBoost isn't clearing this by much, the ceiling is the features, not the model.",
+                    )
+                    m3.metric("Labeled rows", f"{_diag['n_rows']:,}")
+                    m4.metric("Tickers", _diag.get("n_tickers") or "—")
+                    m5.metric("Positive rate", f"{_diag['positive_rate']:.1%}")
+
+                    st.write(
+                        f"**Label:** {_diag.get('label_kind', 'absolute')} · "
+                        f"**Range:** {_diag['date_range'][0]} → {_diag['date_range'][1]} · "
+                        f"**Trained:** {_diag['trained_at'][:19].replace('T', ' ')} UTC"
+                    )
+
+                    if mean_auc is not None and 0.48 <= mean_auc <= 0.52:
+                        st.warning(
+                            "Mean AUC is essentially 0.50 (coin-flip) - this feature/label "
+                            "combination shows no detectable predictive edge on this data."
+                        )
+
+                    st.markdown("**Per-fold AUC** (chronological, purged)")
+                    fold_aucs = _diag.get("fold_aucs") or []
+                    if fold_aucs:
+                        st.dataframe(
+                            pd.DataFrame({
+                                "fold": range(1, len(fold_aucs) + 1),
+                                "auc": [round(a, 4) for a in fold_aucs],
+                            }).set_index("fold"),
+                            use_container_width=True,
+                        )
+
+                    st.markdown("**Feature importance** (final model, most relied-on first)")
+                    importance = _diag.get("feature_importance") or {}
+                    if importance:
+                        imp_series = pd.Series(importance).sort_values(ascending=False)
+                        st.bar_chart(imp_series)
+
+                st.markdown("---")
+                st.markdown("### 📈 Stock Predictions — today's shortlist")
+                st.caption(
+                    "Scores only the stocks already shortlisted by the rule-based engine "
+                    "(Shortlist tab) - not the full scan universe."
                 )
 
-                if mean_auc is not None and 0.48 <= mean_auc <= 0.52:
+                _selected_model_path = _diagnostics_files[_choice_idx].replace("_diagnostics.json", ".joblib")
+                _shortlist_tickers = signals_df["ticker"].tolist() if signals_df is not None and not signals_df.empty else []
+
+                if not _shortlist_tickers:
+                    st.info("No rule-based shortlist for the selected date yet.")
+                elif not os.path.exists(_selected_model_path):
                     st.warning(
-                        "Mean AUC is essentially 0.50 (coin-flip) - this feature/label "
-                        "combination shows no detectable predictive edge on this data."
+                        f"Model file not found at `{_selected_model_path}` "
+                        "(diagnostics exist but the .joblib wasn't committed/retained)."
                     )
+                else:
+                    _scored = _score_shortlist_ml(_shortlist_tickers, _selected_model_path)
+                    if _scored.empty:
+                        st.info("Could not score today's shortlist - see terminal/console for details.")
+                    elif _scored["signal_tier"].isna().all():
+                        st.warning(
+                            "This model run predates empirical calibration - re-run "
+                            "`python -m ml.backfill` (or the equivalent training driver) "
+                            "for this model to populate historical win rates."
+                        )
+                    else:
+                        _tier_style = {
+                            "strong": ("🟢 Strong relative signal", st.success),
+                            "moderate": ("🔵 Moderate relative signal", st.info),
+                            "weak": ("🟠 Weak signal", st.warning),
+                        }
+                        for _, _row in _scored.iterrows():
+                            _tier_label, _box = _tier_style.get(_row["signal_tier"], ("Signal", st.info))
+                            _breakeven_word = "above" if _row["above_breakeven"] else "below"
+                            _baseline_pct = _row["calibrated_probability"] / _row["lift_vs_baseline"]
 
-                st.markdown("**Per-fold AUC** (chronological, purged)")
-                fold_aucs = _diag.get("fold_aucs") or []
-                if fold_aucs:
-                    st.dataframe(
-                        pd.DataFrame({
-                            "fold": range(1, len(fold_aucs) + 1),
-                            "auc": [round(a, 4) for a in fold_aucs],
-                        }).set_index("fold"),
-                        use_container_width=True,
-                    )
-
-                st.markdown("**Feature importance** (final model, most relied-on first)")
-                importance = _diag.get("feature_importance") or {}
-                if importance:
-                    imp_series = pd.Series(importance).sort_values(ascending=False)
-                    st.bar_chart(imp_series)
+                            _box(
+                                f"**{_row['ticker']}** — {_tier_label} ({_row['ml_confidence']:.0%} raw score)\n\n"
+                                f"Calibrated probability: **{_row['calibrated_probability']:.0%}** "
+                                f"(vs {_baseline_pct:.0%} baseline, {_row['lift_vs_baseline']:.2f}x lift) — the raw "
+                                f"score passed through the model's fitted calibration curve, not read directly.\n\n"
+                                f"This +{_row['tp_pct']:.0%}/-{_row['sl_pct']:.0%} setup (₹{_row['entry_price']:.2f} → "
+                                f"target ₹{_row['tp_price']:.2f} / stop ₹{_row['sl_price']:.2f}, {int(_row['max_days'])} "
+                                f"trading days) breaks even at a **{_row['breakeven_win_rate']:.0%} win rate** — "
+                                f"this score is **{_breakeven_word} breakeven**, before costs/slippage/gaps."
+                            )
 
 # ---------------------------------------------------------------------------
 # Tab 5: Admin - manage who can access this app (admins only)

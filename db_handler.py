@@ -216,6 +216,37 @@ def init_db():
                     props TEXT
                 )
             """)
+            # Durable ML paper-trading log - unlike scans/signals, rows here
+            # are NEVER purged by SCAN_HISTORY_RETENTION_DAYS, since a
+            # prediction's outcome may not be known for up to max_days after
+            # it was logged. See ml/paper_trade.py.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS ml_predictions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    prediction_date TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    model_path TEXT NOT NULL,
+                    label_kind TEXT NOT NULL,
+                    ml_confidence REAL NOT NULL,
+                    entry_price REAL NOT NULL,
+                    entry_index_price REAL,
+                    tp_pct REAL NOT NULL,
+                    sl_pct REAL NOT NULL,
+                    max_days INTEGER NOT NULL,
+                    resolved INTEGER NOT NULL DEFAULT 0,
+                    outcome INTEGER,
+                    resolved_date TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_ml_predictions_unique
+                ON ml_predictions(prediction_date, ticker, model_path)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_ml_predictions_resolved
+                ON ml_predictions(resolved)
+            """)
 
             # Migration: add status to a table created by an older version.
             existing_user_cols = {row["name"] for row in conn.execute("PRAGMA table_info(authorized_users)")}
@@ -703,4 +734,90 @@ def delete_custom_analysis(analysis_id):
         get_custom_analysis_by_id.clear()
     except _DB_ERRORS as e:
         print(f"[db_handler] Failed to delete custom analysis {analysis_id}: {e}")
+        raise
+
+
+def has_predictions_for(prediction_date, model_path):
+    """True if ml_predictions already has at least one row for this (prediction_date, model_path) - lets ml/paper_trade.py skip the expensive feature-build+inference work on a same-day re-run."""
+    try:
+        with get_connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM ml_predictions WHERE prediction_date = ? AND model_path = ? LIMIT 1",
+                (prediction_date, model_path),
+            ).fetchone()
+        return row is not None
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to check ml_predictions for {prediction_date}: {e}")
+        return False
+
+
+def save_ml_predictions(rows):
+    """
+    Persists a batch of ML paper-trade picks. Each row is a dict with keys
+    matching the ml_predictions columns (prediction_date, ticker, model_path,
+    label_kind, ml_confidence, entry_price, entry_index_price, tp_pct,
+    sl_pct, max_days, created_at). INSERT OR IGNORE against the
+    (prediction_date, ticker, model_path) unique index, so re-saving the
+    same day's picks (e.g. a second "Run Full Scan Now" click) is a safe
+    no-op rather than a duplicate or an overwrite.
+
+    Returns the number of rows attempted (not the number actually inserted -
+    the underlying libsql/sqlite3 cursor types used by get_connection()
+    don't expose a portable rowcount across both backends).
+    """
+    if not rows:
+        return 0
+    try:
+        with get_connection() as conn:
+            for r in rows:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO ml_predictions (
+                        prediction_date, ticker, model_path, label_kind, ml_confidence,
+                        entry_price, entry_index_price, tp_pct, sl_pct, max_days,
+                        resolved, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                    """,
+                    (
+                        r["prediction_date"], r["ticker"], r["model_path"], r["label_kind"],
+                        float(r["ml_confidence"]), float(r["entry_price"]),
+                        None if r["entry_index_price"] is None else float(r["entry_index_price"]),
+                        float(r["tp_pct"]), float(r["sl_pct"]), int(r["max_days"]),
+                        r["created_at"],
+                    ),
+                )
+        return len(rows)
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to save ml_predictions: {e}")
+        raise
+
+
+def get_pending_ml_predictions():
+    """Returns all unresolved ml_predictions rows as a DataFrame (empty DataFrame on error or none pending)."""
+    try:
+        with get_connection() as conn:
+            rows = conn.execute("SELECT * FROM ml_predictions WHERE resolved = 0").fetchall()
+        return pd.DataFrame([dict(r) for r in rows])
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to fetch pending ml_predictions: {e}")
+        return pd.DataFrame()
+
+
+def mark_ml_predictions_resolved(updates):
+    """
+    updates: list of {"id": int, "outcome": 0 or 1, "resolved_date": "YYYY-MM-DD"}.
+    Batched in one connection block (all-or-nothing per call, matching this
+    module's other multi-row writers like save_scan_results()).
+    """
+    if not updates:
+        return
+    try:
+        with get_connection() as conn:
+            for u in updates:
+                conn.execute(
+                    "UPDATE ml_predictions SET resolved = 1, outcome = ?, resolved_date = ? WHERE id = ?",
+                    (int(u["outcome"]), u["resolved_date"], int(u["id"])),
+                )
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to mark ml_predictions resolved: {e}")
         raise

@@ -16,6 +16,7 @@ session.
 import config
 import db_handler
 from ai_analyst import get_ai_recommendations
+from ml.paper_trade import run_in_background as run_ml_paper_trade_in_background
 from strategy import generate_shortlist
 from ta_engine import is_market_open  # re-exported for callers (e.g. app.py)
 
@@ -34,6 +35,19 @@ def run_pipeline(tickers=None, progress_callback=None):
     shortlist = generate_shortlist(tickers=tickers, progress_callback=progress_callback)
     ai_commentary = get_ai_recommendations(shortlist)
     scan_date = db_handler.save_scan_results(shortlist, ai_commentary, universe_size=len(tickers))
+
+    # Fire-and-forget: logs/resolves the experimental ML model's paper-trade
+    # picks on a background thread, riding this same manual trigger instead
+    # of needing separate scheduling infrastructure. Never blocks or can
+    # fail this function - see ml/paper_trade.py's own internal try/except.
+    #
+    # Scoped to just today's rule-based shortlist (not config.SCAN_UNIVERSE)
+    # and top_pct=1.0 (log every one of them, not just the model's own
+    # top-10%) - this deliberately makes it track the SAME stocks the ML
+    # tab already shows confidence for, rather than independently scoring
+    # the full universe.
+    if not shortlist.empty:
+        run_ml_paper_trade_in_background(tickers=shortlist["ticker"].tolist(), top_pct=1.0)
 
     return shortlist, ai_commentary, scan_date
 

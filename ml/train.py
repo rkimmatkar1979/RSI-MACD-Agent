@@ -22,6 +22,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.impute import SimpleImputer
+from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
@@ -87,8 +88,9 @@ def purged_time_series_splits(dates, n_splits=N_SPLITS, purge_days=PURGE_DAYS):
         yield purged_train_idx, test_idx, len(train_idx) - len(purged_train_idx)
 
 
-def _fit_one_fold(X_train, y_train, xgb_params=XGB_PARAMS):
-    model = XGBClassifier(scale_pos_weight=_scale_pos_weight(y_train), **xgb_params)
+def _fit_one_fold(X_train, y_train, xgb_params=XGB_PARAMS, use_scale_pos_weight=True):
+    spw = _scale_pos_weight(y_train) if use_scale_pos_weight else 1.0
+    model = XGBClassifier(scale_pos_weight=spw, **xgb_params)
     model.fit(X_train, y_train)
     return model
 
@@ -115,7 +117,7 @@ def _fit_logistic_baseline(X_train, y_train):
 
 
 def run_cross_validation(feature_df, label_col="target", feature_cols=FEATURE_COLUMNS,
-                          purge_days=PURGE_DAYS, xgb_params=XGB_PARAMS):
+                          purge_days=PURGE_DAYS, xgb_params=XGB_PARAMS, use_scale_pos_weight=True):
     """
     Diagnostic pass: reports out-of-fold AUC across the purged,
     chronological folds (for both the real XGBoost model and a logistic
@@ -132,6 +134,13 @@ def run_cross_validation(feature_df, label_col="target", feature_cols=FEATURE_CO
     original 90-day label via ml.tune) - pass a different dict for a
     differently-tuned label/horizon rather than overwriting the module
     constant, since multiple horizons can be in active use at once.
+
+    use_scale_pos_weight=False disables the neg/pos class-imbalance
+    correction entirely (scale_pos_weight=1.0 for every fold) - useful for
+    an A/B comparison against the default, since scale_pos_weight improves
+    ranking/AUC on imbalanced labels at a known cost to how well the raw
+    predict_proba output reflects true probabilities (see calibration_table
+    and isotonic_calibration below).
 
     Returns (fold_aucs, oof_df, baseline_fold_aucs) - fold_aucs is the
     XGBoost per-fold AUC list; oof_df has one row per test-fold observation
@@ -158,7 +167,7 @@ def run_cross_validation(feature_df, label_col="target", feature_cols=FEATURE_CO
                   f"(train={len(X_train)}, test={len(X_test)})")
             continue
 
-        model = _fit_one_fold(X_train, y_train, xgb_params=xgb_params)
+        model = _fit_one_fold(X_train, y_train, xgb_params=xgb_params, use_scale_pos_weight=use_scale_pos_weight)
         proba = model.predict_proba(X_test)[:, 1]
         auc = roc_auc_score(y_test, proba)
         fold_aucs.append(auc)
@@ -220,6 +229,73 @@ def precision_at_k(oof_df, k_fracs=(0.05, 0.1, 0.2)):
     return results
 
 
+def calibration_table(oof_df, tp_pct=None, sl_pct=None, n_bins=20):
+    """
+    Bins oof_df's out-of-fold predicted probabilities into n_bins quantile
+    buckets (pd.qcut, duplicates dropped if the score distribution is too
+    narrow/spiky to support n_bins distinct edges) and reports, per bucket:
+    the score range, row count, empirical win rate (mean y_true - "of
+    predictions scored in this range, how many actually hit the target"),
+    lift vs the overall base rate, and - if tp_pct/sl_pct are given -
+    expected value per trade (win_rate*tp_pct - (1-win_rate)*sl_pct).
+
+    This is NOT the same thing as precision_at_k: that buckets by RANK
+    (today's top 5/10/20%), this buckets by the raw SCORE value itself, so
+    a live prediction can be looked up by "which historical bucket does
+    THIS score fall into" regardless of how many other stocks were scored
+    alongside it that day. Returns [] if oof_df is empty.
+    """
+    if oof_df.empty:
+        return []
+
+    base_rate = float(oof_df["y_true"].mean())
+    binned = pd.qcut(oof_df["y_pred_proba"], q=n_bins, duplicates="drop")
+
+    bins = []
+    for interval, group in oof_df.groupby(binned, observed=True):
+        win_rate = float(group["y_true"].mean())
+        entry = {
+            "low": float(interval.left),
+            "high": float(interval.right),
+            "n": int(len(group)),
+            "win_rate": win_rate,
+            "lift": win_rate / base_rate if base_rate else None,
+        }
+        if tp_pct is not None and sl_pct is not None:
+            entry["expected_value"] = win_rate * tp_pct - (1 - win_rate) * sl_pct
+        bins.append(entry)
+
+    bins.sort(key=lambda b: b["low"])
+    return bins
+
+
+def isotonic_calibration(oof_df):
+    """
+    Fits isotonic regression - monotonic, non-parametric - on the
+    out-of-fold (raw predicted probability, actual outcome) pairs: the
+    standard way to turn a model's raw predict_proba into an actual
+    calibrated probability without assuming a parametric shape (unlike
+    Platt/sigmoid scaling, isotonic only enforces "higher raw score =>
+    higher-or-equal calibrated probability" and lets the data set
+    everything else - appropriate here since nothing about XGBoost with
+    scale_pos_weight suggests its raw output follows a sigmoid-shaped
+    miscalibration).
+
+    Architecture: Model -> OOF predictions -> this calibration layer ->
+    calibrated probability. Returns the fitted curve as a list of [x, y]
+    breakpoints (JSON-serializable; interpolate with a plain increasing
+    piecewise-linear lookup at inference time - see ml.infer._calibrate)
+    rather than persisting the sklearn object itself, so diagnostics.json
+    stays the single source of truth with no second joblib file to keep in
+    sync. Returns [] if oof_df is empty.
+    """
+    if oof_df.empty:
+        return []
+    iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+    iso.fit(oof_df["y_pred_proba"], oof_df["y_true"])
+    return [[float(x), float(y)] for x, y in zip(iso.X_thresholds_, iso.y_thresholds_)]
+
+
 def print_feature_importance(model, feature_cols=FEATURE_COLUMNS):
     importance = pd.Series(model.feature_importances_, index=feature_cols).sort_values(ascending=False)
     print("\nFeature importance (final model, most relied-on first):")
@@ -242,7 +318,8 @@ def load_diagnostics(model_path):
 
 
 def train_and_save_model(feature_df, model_path, label_col="target", feature_cols=FEATURE_COLUMNS,
-                          label_kind="absolute", purge_days=PURGE_DAYS, label_config=None, xgb_params=XGB_PARAMS):
+                          label_kind="absolute", purge_days=PURGE_DAYS, label_config=None, xgb_params=XGB_PARAMS,
+                          use_scale_pos_weight=True):
     """
     feature_df must already carry a `target` column (see ml.labeling,
     merged onto ml.features.build_feature_matrix's output) - NaN targets
@@ -275,7 +352,8 @@ def train_and_save_model(feature_df, model_path, label_col="target", feature_col
           f"spanning {df['date'].min().date()} to {df['date'].max().date()}")
 
     fold_aucs, oof_df, baseline_fold_aucs = run_cross_validation(
-        df, label_col=label_col, feature_cols=feature_cols, purge_days=purge_days, xgb_params=xgb_params)
+        df, label_col=label_col, feature_cols=feature_cols, purge_days=purge_days, xgb_params=xgb_params,
+        use_scale_pos_weight=use_scale_pos_weight)
 
     precision_stats = precision_at_k(oof_df)
     if precision_stats:
@@ -284,8 +362,28 @@ def train_and_save_model(feature_df, model_path, label_col="target", feature_col
             print(f"  {k}: precision={stats['precision']:.1%} vs base_rate={stats['base_rate']:.1%} "
                   f"(lift={stats['lift']:.2f}x, n={stats['n']})")
 
+    _lc = label_config or {}
+    calibration = calibration_table(oof_df, tp_pct=_lc.get("tp_pct"), sl_pct=_lc.get("sl_pct"))
+    breakeven_win_rate = (
+        _lc["sl_pct"] / (_lc["tp_pct"] + _lc["sl_pct"])
+        if "tp_pct" in _lc and "sl_pct" in _lc else None
+    )
+    if calibration:
+        print(f"\nCalibration ({len(calibration)} score bins, out-of-fold)"
+              + (f" - breakeven win rate {breakeven_win_rate:.1%}:" if breakeven_win_rate is not None else ":"))
+        for b in calibration:
+            print(f"  [{b['low']:.3f}, {b['high']:.3f}] n={b['n']:>6d} win_rate={b['win_rate']:.1%} lift={b['lift']:.2f}x"
+                  + (f" ev={b['expected_value']:+.2%}" if "expected_value" in b else ""))
+
+    oof_base_rate = float(oof_df["y_true"].mean()) if not oof_df.empty else None
+    isotonic_curve = isotonic_calibration(oof_df)
+    if isotonic_curve:
+        print(f"\nIsotonic calibration fit on {len(oof_df)} OOF predictions "
+              f"({len(isotonic_curve)} breakpoints).")
+
     X_full, y_full = df[feature_cols], df[label_col]
-    final_model = XGBClassifier(scale_pos_weight=_scale_pos_weight(y_full), **xgb_params)
+    final_model = XGBClassifier(
+        scale_pos_weight=(_scale_pos_weight(y_full) if use_scale_pos_weight else 1.0), **xgb_params)
     final_model.fit(X_full, y_full)
 
     importance = print_feature_importance(final_model, feature_cols)
@@ -310,6 +408,11 @@ def train_and_save_model(feature_df, model_path, label_col="target", feature_col
         "baseline_mean_auc": float(np.mean(baseline_fold_aucs)) if baseline_fold_aucs else None,
         "feature_importance": {k: float(v) for k, v in importance.items()},
         "precision_at_k": precision_stats,
+        "calibration": calibration,
+        "breakeven_win_rate": breakeven_win_rate,
+        "isotonic_calibration": isotonic_curve,
+        "oof_base_rate": oof_base_rate,
+        "use_scale_pos_weight": use_scale_pos_weight,
     }
     with open(diagnostics_path(model_path), "w") as f:
         json.dump(diagnostics, f, indent=2)

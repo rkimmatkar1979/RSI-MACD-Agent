@@ -124,6 +124,41 @@ FEATURE_COLUMNS = [
     "macd_extension_ratio",
 ]
 
+# Ablation-study feature groups (see ml/features.py::build_price_features_extended
+# and the ablation driver script) - NOT part of the default FEATURE_COLUMNS
+# above, so the shipped model/pipeline is unaffected until/unless a group is
+# proven to help and explicitly merged in.
+TREND_FEATURE_COLUMNS = [
+    "dist_from_sma_20",
+    "dist_from_sma_50",
+    "dist_from_sma_200",
+    "sma_20_50_gap",
+    "adx_14",
+    "trend_slope_20",
+]
+
+VOLATILITY_COMPLETION_FEATURE_COLUMNS = [
+    "atr_14",
+    "atr_pct",
+    "room_to_swing_low_pct",
+]
+
+VOLUME_FEATURE_COLUMNS = [
+    "obv_slope_20",
+    "volume_price_divergence",
+    "breakout_volume_ratio",
+]
+
+REGIME_FEATURE_COLUMNS = [
+    "nifty_momentum_21d",
+    "nifty_dist_from_sma50",
+    "nifty_dist_from_sma200",
+    "nifty_volatility_21d",
+    "india_vix",
+    "india_vix_change_5d",
+    "market_breadth_50dma",
+]
+
 
 def _rsi(close, period=RSI_PERIOD):
     """Wilder's RSI, vectorized over the full series (see ta_engine.calculate_rsi for the single-value equivalent)."""
@@ -350,6 +385,91 @@ def _median_up_swing_pct(close, lookback_days=SWING_TRACK_LOOKBACK_DAYS, reversa
     return pd.Series(result, index=close.index)
 
 
+# --- Ablation-study indicators (trend / volatility-completion / volume) ----
+
+def _sma(close, window):
+    return close.rolling(window, min_periods=window).mean()
+
+
+def _dist_from_sma(close, window):
+    sma = _sma(close, window)
+    return (close - sma) / sma
+
+
+def _true_range(high, low, close):
+    prev_close = close.shift(1)
+    return pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+
+
+def _atr(high, low, close, period=14):
+    """Wilder's Average True Range - uses the high/low/prev-close range, unlike volatility_20d's close-to-close std, so it reflects intraday range even on a flat-closing day."""
+    return _true_range(high, low, close).ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+
+
+def _adx(high, low, close, period=14):
+    """
+    Standard Wilder Average Directional Index: trend STRENGTH (0-100),
+    direction-agnostic - a strong downtrend scores as high as a strong
+    uptrend, unlike momentum. Complements momentum/RSI (which say WHICH
+    way) with "how much is this actually trending vs. chopping sideways".
+    """
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=high.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=high.index)
+
+    atr = _true_range(high, low, close).ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / atr)
+    minus_di = 100 * (minus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / atr)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+    return dx.ewm(alpha=1 / period, min_periods=period, adjust=False).mean().replace([np.inf, -np.inf], np.nan)
+
+
+def _trend_slope(close, window=20):
+    """OLS slope of closing price over the trailing window, normalized by the window's mean price - positive/larger = stronger, steadier uptrend; near zero = flat/choppy."""
+    def _slope(arr):
+        x = np.arange(len(arr))
+        y_mean = arr.mean()
+        denom = ((x - x.mean()) ** 2).sum()
+        if denom == 0 or y_mean == 0:
+            return 0.0
+        return (((x - x.mean()) * (arr - y_mean)).sum() / denom) / y_mean
+    return close.rolling(window, min_periods=window).apply(_slope, raw=True)
+
+
+def _room_to_swing_low(low, close, lookback=SWING_TRACK_LOOKBACK_DAYS):
+    """(close - swing low) / close - the downside mirror of room_to_swing_high_pct: how far price already sits above its recent floor."""
+    swing_low = low.rolling(lookback, min_periods=lookback).min()
+    return (close - swing_low) / close
+
+
+def _obv_slope_20(close, volume, window=20):
+    """
+    On-Balance Volume's own trailing-window net flow, normalized by that
+    window's total volume (raw cumulative OBV is unbounded/non-stationary,
+    so its LEVEL isn't a usable feature - the recent SLOPE, expressed as a
+    fraction of volume traded, is): positive = net buying pressure
+    (up-day volume outweighing down-day volume) over the last `window`
+    sessions, negative = net selling pressure.
+    """
+    direction = np.sign(close.diff()).fillna(0)
+    obv = (direction * volume).cumsum()
+    net_flow = obv.diff(window)
+    total_vol = volume.rolling(window, min_periods=window).sum()
+    return (net_flow / total_vol).replace([np.inf, -np.inf], np.nan)
+
+
+def _breakout_volume_ratio(close, high, vol_ratio, lookback=20):
+    """volume_vs_20d_avg specifically on sessions closing at a new `lookback`-day high, 0 elsewhere - elevated volume ON a breakout, not just elevated volume in general."""
+    rolling_high = high.rolling(lookback, min_periods=lookback).max()
+    is_breakout = close >= rolling_high
+    return vol_ratio.where(is_breakout, 0.0)
+
+
 def _ticker_price_features(g):
     g = g.sort_values("date").reset_index(drop=True)
     close, high, low, volume = g["close"], g["high"], g["low"], g["volume"]
@@ -392,6 +512,52 @@ def _ticker_price_features(g):
         "volatility_regime": volatility_regime.to_numpy(),
         "room_to_swing_high_pct": room_to_swing_high.to_numpy(),
         "median_up_swing_pct": median_up_swing.to_numpy(),
+    })
+
+
+def _ticker_extended_features(g):
+    """
+    Per-ticker indicators for the ablation-study groups (trend,
+    volatility-completion, volume) - a SEPARATE pass over the price panel
+    from _ticker_price_features, so the production feature set/pipeline
+    stays completely undisturbed. See build_price_features_extended().
+    """
+    g = g.sort_values("date").reset_index(drop=True)
+    close, high, low, volume = g["close"], g["high"], g["low"], g["volume"]
+
+    sma_20, sma_50 = _sma(close, 20), _sma(close, 50)
+    dist_20 = _dist_from_sma(close, 20)
+    dist_50 = _dist_from_sma(close, 50)
+    dist_200 = _dist_from_sma(close, 200)
+    sma_gap = ((sma_20 - sma_50) / sma_50).replace([np.inf, -np.inf], np.nan)
+    adx = _adx(high, low, close)
+    slope = _trend_slope(close)
+
+    atr = _atr(high, low, close)
+    atr_pct = (atr / close).replace([np.inf, -np.inf], np.nan)
+    room_low = _room_to_swing_low(low, close)
+
+    vol_ratio = _volume_ratio(volume)
+    obv_slope = _obv_slope_20(close, volume)
+    momentum_20d = _momentum(close)
+    divergence = momentum_20d - obv_slope
+    breakout_vol = _breakout_volume_ratio(close, high, vol_ratio)
+
+    return pd.DataFrame({
+        "ticker": g["ticker"].to_numpy(),
+        "date": g["date"].to_numpy(),
+        "dist_from_sma_20": dist_20.to_numpy(),
+        "dist_from_sma_50": dist_50.to_numpy(),
+        "dist_from_sma_200": dist_200.to_numpy(),
+        "sma_20_50_gap": sma_gap.to_numpy(),
+        "adx_14": adx.to_numpy(),
+        "trend_slope_20": slope.to_numpy(),
+        "atr_14": atr.to_numpy(),
+        "atr_pct": atr_pct.to_numpy(),
+        "room_to_swing_low_pct": room_low.to_numpy(),
+        "obv_slope_20": obv_slope.to_numpy(),
+        "volume_price_divergence": divergence.to_numpy(),
+        "breakout_volume_ratio": breakout_vol.to_numpy(),
     })
 
 
@@ -502,6 +668,80 @@ def build_price_features(price_df, index_df=None):
     features = _add_cross_sectional_ranks(features)
     features = _add_rule_composite_score(features)
     return features
+
+
+def _add_regime_features(price_features, index_df, vix_df):
+    """
+    Absolute market-regime signals - the index's/VIX's own state, same
+    value for every ticker on a given date - not to be confused with
+    market_relative_momentum_20d (a per-stock value relative to the
+    index). NaN throughout if index_df/vix_df is omitted.
+    """
+    df = price_features.copy()
+
+    if index_df is not None:
+        idx = index_df[["date", "close"]].copy()
+        idx["date"] = pd.to_datetime(idx["date"])
+        idx = idx.sort_values("date")
+        idx["nifty_momentum_21d"] = idx["close"].pct_change(21)
+        idx["nifty_dist_from_sma50"] = _dist_from_sma(idx["close"], 50)
+        idx["nifty_dist_from_sma200"] = _dist_from_sma(idx["close"], 200)
+        idx["nifty_volatility_21d"] = idx["close"].pct_change().rolling(21, min_periods=21).std()
+        regime_cols = ["nifty_momentum_21d", "nifty_dist_from_sma50", "nifty_dist_from_sma200", "nifty_volatility_21d"]
+        df = df.merge(idx[["date"] + regime_cols], on="date", how="left")
+    else:
+        for col in ("nifty_momentum_21d", "nifty_dist_from_sma50", "nifty_dist_from_sma200", "nifty_volatility_21d"):
+            df[col] = np.nan
+
+    if vix_df is not None:
+        vix = vix_df[["date", "close"]].rename(columns={"close": "india_vix"}).copy()
+        vix["date"] = pd.to_datetime(vix["date"])
+        vix = vix.sort_values("date")
+        vix["india_vix_change_5d"] = vix["india_vix"].pct_change(5)
+        df = df.merge(vix[["date", "india_vix", "india_vix_change_5d"]], on="date", how="left")
+    else:
+        df["india_vix"] = np.nan
+        df["india_vix_change_5d"] = np.nan
+
+    return df
+
+
+def _add_market_breadth(price_features):
+    """Cross-sectional: fraction of the whole universe trading above its own 50-day SMA on that date - requires dist_from_sma_50 (TREND group) already present."""
+    df = price_features.copy()
+    if "dist_from_sma_50" not in df.columns:
+        df["market_breadth_50dma"] = np.nan
+        return df
+    above = (df["dist_from_sma_50"] > 0).astype(float)
+    df["market_breadth_50dma"] = df.assign(_above=above).groupby("date")["_above"].transform("mean")
+    return df
+
+
+def build_price_features_extended(price_df, index_df=None, vix_df=None):
+    """
+    build_price_features() plus the 4 ablation-study feature groups
+    (TREND_/VOLATILITY_COMPLETION_/VOLUME_/REGIME_FEATURE_COLUMNS) - a
+    separate function from build_price_features()/build_feature_matrix()
+    so the shipped model/pipeline stays completely undisturbed while this
+    is evaluated. Callers slice whichever combination of the ablation
+    groups they want to test from the returned columns.
+    """
+    base = build_price_features(price_df, index_df)
+
+    required = {"ticker", "date", "open", "high", "low", "close", "volume"}
+    missing = required - set(price_df.columns)
+    if missing:
+        raise ValueError(f"price_df missing required columns: {sorted(missing)}")
+    df = price_df.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values(["ticker", "date"])
+    parts = [_ticker_extended_features(g) for _, g in df.groupby("ticker", sort=False)]
+    extended = pd.concat(parts, ignore_index=True)
+
+    merged = base.merge(extended, on=["ticker", "date"], how="left")
+    merged = _add_regime_features(merged, index_df, vix_df)
+    merged = _add_market_breadth(merged)
+    return merged
 
 
 def build_fundamental_features(fundamentals_df, lag_days=FUNDAMENTALS_LAG_DAYS):

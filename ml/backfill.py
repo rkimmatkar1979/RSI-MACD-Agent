@@ -39,6 +39,7 @@ from ml.train import train_and_save_model
 DEFAULT_PERIOD = "5y"
 DEFAULT_MODEL_PATH = os.path.join("ml", "models", "tier1_model.joblib")
 INDEX_TICKER = "^NSEI"  # Nifty 50 index - benchmark for the relative label and market_relative_momentum_20d
+VIX_TICKER = "^INDIAVIX"  # regime feature - available on yfinance with full 5y+ history
 CACHE_DIR = os.path.join("ml", "data")
 
 BASE_FEATURE_COLUMNS = [
@@ -149,6 +150,31 @@ def download_index_history(ticker=INDEX_TICKER, period=DEFAULT_PERIOD, use_cache
     df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=True)
     if df is None or df.empty:
         raise RuntimeError(f"Could not download benchmark index data for {ticker}")
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df = df.reset_index().rename(columns={"Date": "date", "Close": "close"})
+    result = df[["date", "close"]].dropna()
+
+    if use_cache:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        result.to_pickle(cache_path)
+    return result
+
+
+def _vix_cache_path(period):
+    return os.path.join(CACHE_DIR, f"vix_history_{period}.pkl")
+
+
+def download_vix_history(ticker=VIX_TICKER, period=DEFAULT_PERIOD, use_cache=True, refresh_cache=False):
+    """India VIX history (date, close only) - regime feature (see ml.features REGIME_FEATURE_COLUMNS). Same shape/caching pattern as download_index_history()."""
+    cache_path = _vix_cache_path(period)
+    if use_cache and not refresh_cache and os.path.exists(cache_path):
+        print(f"[backfill] using cached VIX history from {cache_path}")
+        return pd.read_pickle(cache_path)
+
+    df = yf.download(ticker, period=period, interval="1d", progress=False, auto_adjust=True)
+    if df is None or df.empty:
+        raise RuntimeError(f"Could not download VIX data for {ticker}")
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     df = df.reset_index().rename(columns={"Date": "date", "Close": "close"})

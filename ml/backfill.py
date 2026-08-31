@@ -22,6 +22,7 @@ Run:
     python -m ml.backfill                       # full config.SCAN_UNIVERSE, 5y history, broadened features + relative label
     python -m ml.backfill --limit 30 --period 2y # quick smoke run on a subset
     python -m ml.backfill --features base --label absolute  # reproduce the original Tier-1 experiment
+    python -m ml.backfill --tp-pct 0.05 --sl-pct 0.03 --max-days 21  # shorter, momentum-favorable horizon
 """
 
 import argparse
@@ -32,7 +33,7 @@ import yfinance as yf
 
 import config
 from ml.features import FEATURE_COLUMNS, build_feature_matrix
-from ml.labeling import relative_triple_barrier_labels, triple_barrier_labels
+from ml.labeling import MAX_HOLDING_DAYS, STOP_LOSS_PCT, TAKE_PROFIT_PCT, relative_triple_barrier_labels, triple_barrier_labels
 from ml.train import train_and_save_model
 
 DEFAULT_PERIOD = "5y"
@@ -42,8 +43,16 @@ CACHE_DIR = os.path.join("ml", "data")
 
 BASE_FEATURE_COLUMNS = [
     "rsi_14",
-    "is_rsi_under_50_and_rising",
-    "macd_state",
+    # rsi_distance_from_50 / rsi_slope and macd_hist_norm /
+    # macd_extension_ratio replace the original spec's discrete
+    # is_rsi_under_50_and_rising / macd_state - those two are no longer
+    # emitted by ml.features.build_feature_matrix() as model-facing columns
+    # (see ml/features.py FEATURE_COLUMNS "Round 4" comment), so this list
+    # must track that swap to stay runnable.
+    "rsi_distance_from_50",
+    "rsi_slope",
+    "macd_hist_norm",
+    "macd_extension_ratio",
     "days_since_macd_crossover",
     "pct_dist_to_fib_618",
     "pct_dist_to_fib_50",
@@ -152,7 +161,8 @@ def download_index_history(ticker=INDEX_TICKER, period=DEFAULT_PERIOD, use_cache
 
 
 def main(tickers=None, period=DEFAULT_PERIOD, model_path=DEFAULT_MODEL_PATH,
-         feature_set="broadened", label_kind="relative", refresh_cache=False):
+         feature_set="broadened", label_kind="relative", refresh_cache=False,
+         tp_pct=TAKE_PROFIT_PCT, sl_pct=STOP_LOSS_PCT, max_days=MAX_HOLDING_DAYS):
     tickers = tickers or config.SCAN_UNIVERSE
     feature_cols = FEATURE_COLUMNS if feature_set == "broadened" else BASE_FEATURE_COLUMNS
 
@@ -167,19 +177,27 @@ def main(tickers=None, period=DEFAULT_PERIOD, model_path=DEFAULT_MODEL_PATH,
     features = build_feature_matrix(price_df, empty_fundamentals(), index_df=index_df)
     features = features[["ticker", "date"] + feature_cols]
 
-    print(f"[backfill] computing {label_kind} triple-barrier labels (scans forward up to 90 days per row)...")
+    print(f"[backfill] computing {label_kind} triple-barrier labels "
+          f"(+{tp_pct:.1%}/-{sl_pct:.1%}, scans forward up to {max_days} days per row)...")
     if label_kind == "relative":
-        labels = relative_triple_barrier_labels(price_df, index_df)
+        labels = relative_triple_barrier_labels(price_df, index_df, tp_pct=tp_pct, sl_pct=sl_pct, max_days=max_days)
     else:
-        labels = triple_barrier_labels(price_df)
+        labels = triple_barrier_labels(price_df, tp_pct=tp_pct, sl_pct=sl_pct, max_days=max_days)
 
     merged = features.merge(labels, on=["ticker", "date"], how="left")
     resolved = merged["target"].notna()
     print(f"[backfill] {resolved.sum()} labeled rows ({(~resolved).sum()} unresolved/censored), "
           f"{merged.loc[resolved, 'target'].mean():.1%} positive")
 
+    # Purge window must match the label's own forward-looking horizon (see
+    # ml.train.run_cross_validation) - a training row within max_days of a
+    # test fold's start was labeled using price action overlapping the test
+    # window, regardless of what the DEFAULT 90-day horizon used to be.
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
-    train_and_save_model(merged, model_path, feature_cols=feature_cols, label_kind=label_kind)
+    train_and_save_model(
+        merged, model_path, feature_cols=feature_cols, label_kind=label_kind,
+        purge_days=max_days, label_config={"tp_pct": tp_pct, "sl_pct": sl_pct, "max_days": max_days},
+    )
 
 
 if __name__ == "__main__":
@@ -190,8 +208,12 @@ if __name__ == "__main__":
     parser.add_argument("--features", choices=["base", "broadened"], default="broadened")
     parser.add_argument("--label", choices=["absolute", "relative"], default="relative")
     parser.add_argument("--refresh-cache", action="store_true", help="Ignore any cached price/index history and re-download from yfinance.")
+    parser.add_argument("--tp-pct", type=float, default=TAKE_PROFIT_PCT, help=f"Take-profit barrier as a fraction, e.g. 0.05 for 5%% (default {TAKE_PROFIT_PCT}).")
+    parser.add_argument("--sl-pct", type=float, default=STOP_LOSS_PCT, help=f"Stop-loss barrier as a fraction (default {STOP_LOSS_PCT}).")
+    parser.add_argument("--max-days", type=int, default=MAX_HOLDING_DAYS, help=f"Label horizon in calendar days; also used as the purged-CV purge window (default {MAX_HOLDING_DAYS}).")
     args = parser.parse_args()
 
     universe = config.SCAN_UNIVERSE[: args.limit] if args.limit else None
     main(tickers=universe, period=args.period, model_path=args.model_path,
-         feature_set=args.features, label_kind=args.label, refresh_cache=args.refresh_cache)
+         feature_set=args.features, label_kind=args.label, refresh_cache=args.refresh_cache,
+         tp_pct=args.tp_pct, sl_pct=args.sl_pct, max_days=args.max_days)

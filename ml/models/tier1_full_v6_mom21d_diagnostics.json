@@ -1,0 +1,80 @@
+{
+  "trained_at": "2026-08-31T06:57:37.615866+00:00",
+  "label_kind": "relative",
+  "label_config": {
+    "tp_pct": 0.05,
+    "sl_pct": 0.03,
+    "max_days": 21
+  },
+  "purge_days": 21,
+  "n_rows": 344620,
+  "positive_rate": 0.3187655968893274,
+  "date_range": [
+    "2021-08-30",
+    "2026-08-26"
+  ],
+  "n_tickers": 302,
+  "fold_aucs": [
+    0.5493064056204493,
+    0.5840244385599891,
+    0.5579347263714804,
+    0.5791870339544118,
+    0.5818431285278262
+  ],
+  "mean_auc": 0.5704591466068314,
+  "std_auc": 0.014100267807191695,
+  "baseline_fold_aucs": [
+    0.5569522946420311,
+    0.581013937315195,
+    0.5550061195765252,
+    0.5756954009842843,
+    0.5479955897342763
+  ],
+  "baseline_mean_auc": 0.5633326684504624,
+  "feature_importance": {
+    "volatility_20d": 0.17182044684886932,
+    "volatility_20d_rank": 0.15598554909229279,
+    "pct_dist_to_fib_618": 0.09452185034751892,
+    "pct_dist_to_fib_50": 0.07594531029462814,
+    "momentum_60d": 0.07074926793575287,
+    "room_to_swing_high_pct": 0.054879080504179,
+    "volatility_regime": 0.04687020182609558,
+    "rsi_distance_from_50": 0.0436897873878479,
+    "rsi_14": 0.04297361150383949,
+    "momentum_20d": 0.0368814542889595,
+    "macd_extension_ratio": 0.036012545228004456,
+    "momentum_5d": 0.035000693053007126,
+    "market_relative_momentum_20d": 0.032285675406455994,
+    "macd_hist_norm": 0.026866747066378593,
+    "median_up_swing_pct": 0.022911984473466873,
+    "momentum_20d_rank": 0.018869630992412567,
+    "volume_vs_20d_avg": 0.017024699598550797,
+    "days_since_macd_crossover": 0.0167114045470953,
+    "profit_growth_yoy": 0.0,
+    "promoter_holding_quarterly_change": 0.0,
+    "rsi_14_rank": 0.0,
+    "sector_relative_momentum_20d": 0.0,
+    "rule_composite_score": 0.0,
+    "rsi_slope": 0.0
+  },
+  "precision_at_k": {
+    "top_5pct": {
+      "n": 14359,
+      "precision": 0.4054599902500174,
+      "base_rate": 0.31625113169440766,
+      "lift": 1.282082337785314
+    },
+    "top_10pct": {
+      "n": 28718,
+      "precision": 0.4093251619193537,
+      "base_rate": 0.31625113169440766,
+      "lift": 1.294304180751148
+    },
+    "top_20pct": {
+      "n": 57436,
+      "precision": 0.39489170555052583,
+      "base_rate": 0.31625113169440766,
+      "lift": 1.2486649563426964
+    }
+  }
+}

@@ -87,8 +87,8 @@ def purged_time_series_splits(dates, n_splits=N_SPLITS, purge_days=PURGE_DAYS):
         yield purged_train_idx, test_idx, len(train_idx) - len(purged_train_idx)
 
 
-def _fit_one_fold(X_train, y_train):
-    model = XGBClassifier(scale_pos_weight=_scale_pos_weight(y_train), **XGB_PARAMS)
+def _fit_one_fold(X_train, y_train, xgb_params=XGB_PARAMS):
+    model = XGBClassifier(scale_pos_weight=_scale_pos_weight(y_train), **xgb_params)
     model.fit(X_train, y_train)
     return model
 
@@ -114,12 +114,24 @@ def _fit_logistic_baseline(X_train, y_train):
     return model
 
 
-def run_cross_validation(feature_df, label_col="target", feature_cols=FEATURE_COLUMNS):
+def run_cross_validation(feature_df, label_col="target", feature_cols=FEATURE_COLUMNS,
+                          purge_days=PURGE_DAYS, xgb_params=XGB_PARAMS):
     """
     Diagnostic pass: reports out-of-fold AUC across the purged,
     chronological folds (for both the real XGBoost model and a logistic
     regression baseline, see _fit_logistic_baseline) so overfitting is
     visible before the final model is trained on the full dataset.
+
+    purge_days should match (or exceed) the label's own forward-looking
+    horizon (see purged_time_series_splits) - callers using a shorter
+    label window than the 90-day default MUST pass the matching purge_days
+    or training rows too close to a test fold's start will leak label
+    information from inside the test window.
+
+    xgb_params defaults to this module's XGB_PARAMS (tuned for the
+    original 90-day label via ml.tune) - pass a different dict for a
+    differently-tuned label/horizon rather than overwriting the module
+    constant, since multiple horizons can be in active use at once.
 
     Returns (fold_aucs, oof_df, baseline_fold_aucs) - fold_aucs is the
     XGBoost per-fold AUC list; oof_df has one row per test-fold observation
@@ -137,7 +149,7 @@ def run_cross_validation(feature_df, label_col="target", feature_cols=FEATURE_CO
     fold_aucs = []
     baseline_fold_aucs = []
     oof_parts = []
-    for fold, (train_idx, test_idx, n_purged) in enumerate(purged_time_series_splits(df["date"]), start=1):
+    for fold, (train_idx, test_idx, n_purged) in enumerate(purged_time_series_splits(df["date"], purge_days=purge_days), start=1):
         X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
         X_test, y_test = X.iloc[test_idx], y.iloc[test_idx]
 
@@ -146,7 +158,7 @@ def run_cross_validation(feature_df, label_col="target", feature_cols=FEATURE_CO
                   f"(train={len(X_train)}, test={len(X_test)})")
             continue
 
-        model = _fit_one_fold(X_train, y_train)
+        model = _fit_one_fold(X_train, y_train, xgb_params=xgb_params)
         proba = model.predict_proba(X_test)[:, 1]
         auc = roc_auc_score(y_test, proba)
         fold_aucs.append(auc)
@@ -229,7 +241,8 @@ def load_diagnostics(model_path):
         return json.load(f)
 
 
-def train_and_save_model(feature_df, model_path, label_col="target", feature_cols=FEATURE_COLUMNS, label_kind="absolute"):
+def train_and_save_model(feature_df, model_path, label_col="target", feature_cols=FEATURE_COLUMNS,
+                          label_kind="absolute", purge_days=PURGE_DAYS, label_config=None, xgb_params=XGB_PARAMS):
     """
     feature_df must already carry a `target` column (see ml.labeling,
     merged onto ml.features.build_feature_matrix's output) - NaN targets
@@ -246,7 +259,13 @@ def train_and_save_model(feature_df, model_path, label_col="target", feature_col
 
     label_kind is purely descriptive (e.g. "absolute" vs "relative-to-Nifty")
     and gets stamped into the diagnostics file so the UI can show which
-    label definition produced a given result.
+    label definition produced a given result. purge_days MUST match (or
+    exceed) the label's own max_days horizon - see run_cross_validation.
+    label_config, if given (e.g. {"tp_pct":..., "sl_pct":..., "max_days":...}),
+    is stamped into diagnostics as-is so runs with a non-default label
+    horizon stay distinguishable from each other after the fact. xgb_params
+    defaults to this module's XGB_PARAMS (see run_cross_validation) and is
+    also stamped into diagnostics for the same reason.
     """
     df = feature_df.dropna(subset=[label_col]).sort_values("date").reset_index(drop=True)
     if df.empty:
@@ -255,7 +274,8 @@ def train_and_save_model(feature_df, model_path, label_col="target", feature_col
     print(f"Training on {len(df)} labeled rows ({df[label_col].mean():.1%} positive) "
           f"spanning {df['date'].min().date()} to {df['date'].max().date()}")
 
-    fold_aucs, oof_df, baseline_fold_aucs = run_cross_validation(df, label_col=label_col, feature_cols=feature_cols)
+    fold_aucs, oof_df, baseline_fold_aucs = run_cross_validation(
+        df, label_col=label_col, feature_cols=feature_cols, purge_days=purge_days, xgb_params=xgb_params)
 
     precision_stats = precision_at_k(oof_df)
     if precision_stats:
@@ -265,7 +285,7 @@ def train_and_save_model(feature_df, model_path, label_col="target", feature_col
                   f"(lift={stats['lift']:.2f}x, n={stats['n']})")
 
     X_full, y_full = df[feature_cols], df[label_col]
-    final_model = XGBClassifier(scale_pos_weight=_scale_pos_weight(y_full), **XGB_PARAMS)
+    final_model = XGBClassifier(scale_pos_weight=_scale_pos_weight(y_full), **xgb_params)
     final_model.fit(X_full, y_full)
 
     importance = print_feature_importance(final_model, feature_cols)
@@ -276,6 +296,9 @@ def train_and_save_model(feature_df, model_path, label_col="target", feature_col
     diagnostics = {
         "trained_at": pd.Timestamp.now(tz="UTC").isoformat(),
         "label_kind": label_kind,
+        "label_config": label_config,
+        "purge_days": purge_days,
+        "xgb_params": xgb_params,
         "n_rows": int(len(df)),
         "positive_rate": float(df[label_col].mean()),
         "date_range": [str(df["date"].min().date()), str(df["date"].max().date())],

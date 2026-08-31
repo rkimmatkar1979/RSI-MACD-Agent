@@ -84,8 +84,6 @@ RULE_SECTOR_TREND_THRESHOLD = config.SECTOR_TREND_THRESHOLD
 
 FEATURE_COLUMNS = [
     "rsi_14",
-    "is_rsi_under_50_and_rising",
-    "macd_state",
     "days_since_macd_crossover",
     "pct_dist_to_fib_618",
     "pct_dist_to_fib_50",
@@ -114,6 +112,16 @@ FEATURE_COLUMNS = [
     # Round 3: volatility REGIME (is realized vol expanding vs. its own
     # longer-run baseline), not just its absolute level.
     "volatility_regime",
+    # Round 4: continuous replacements for the old discrete
+    # is_rsi_under_50_and_rising / macd_state - those two carried almost no
+    # importance in v4 (macd_state 3 buckets, is_rsi_under_50_and_rising 2)
+    # since a tree gets far less to split on from a handful of buckets than
+    # from a continuous ratio. Same underlying signals, finer resolution -
+    # see _rsi_continuous_features() / _macd_continuous_features().
+    "rsi_distance_from_50",
+    "rsi_slope",
+    "macd_hist_norm",
+    "macd_extension_ratio",
 ]
 
 
@@ -158,7 +166,12 @@ def _days_since_bullish_crossover(macd_line, signal_line):
     return pd.Series(days_since, index=diff.index)
 
 
-def _macd_state(macd_line, signal_line, hist, days_since_cross):
+def _macd_hist_scale(hist, window=MACD_HIST_SCALE_WINDOW):
+    """Rolling mean |histogram| - this stock's own recent typical MACD histogram magnitude, used to scale-normalize the raw histogram/line into ratios comparable across stocks and volatility regimes."""
+    return hist.abs().rolling(window, min_periods=5).mean()
+
+
+def _macd_state(macd_line, signal_line, hist, days_since_cross, hist_scale):
     """
     Categorical MACD state per row:
       2 (crossover)    - a bullish crossover happened within the last
@@ -175,8 +188,12 @@ def _macd_state(macd_line, signal_line, hist, days_since_cross):
     Rows before a ticker has enough history for hist_scale / RSI-equivalent
     warm-up default to 0 (overextended/no-signal), the same fallback bucket
     used when there's genuinely no live setup.
+
+    Kept only as an input to rule_composite_score (mirrors the rule engine's
+    own discrete state machine) - no longer fed to the model directly as a
+    feature, see macd_hist_norm / macd_extension_ratio below for the
+    continuous equivalents the model actually trains on.
     """
-    hist_scale = hist.abs().rolling(MACD_HIST_SCALE_WINDOW, min_periods=5).mean()
     extension_ratio = (macd_line.abs() / hist_scale).replace([np.inf, -np.inf], np.nan)
 
     fresh_crossover = days_since_cross <= MACD_CROSSOVER_LOOKBACK_DAYS
@@ -191,6 +208,41 @@ def _macd_state(macd_line, signal_line, hist, days_since_cross):
     state = state.mask(fresh_crossover & extended, MACD_STATE_OVEREXTENDED)
     state = state.mask(fresh_crossover & ~extended, MACD_STATE_CROSSOVER)
     return state.astype(int)
+
+
+def _macd_continuous_features(macd_line, hist, hist_scale):
+    """
+    Continuous replacements for the old 3-bucket macd_state:
+      macd_hist_norm      - signed histogram size relative to this stock's
+                             own recent typical |histogram| (hist_scale).
+                             Positive/growing = bullish momentum building,
+                             near zero = flat, negative = bearish/fading -
+                             generalizes the old is_small/is_shrinking/
+                             converging checks into one continuous ratio
+                             instead of a hard threshold.
+      macd_extension_ratio - |MACD line| relative to hist_scale - how far
+                             the line has already run from zero in
+                             scale-normalized terms. Generalizes the old
+                             fixed MACD_EXTENSION_RATIO (2.0) cutoff into a
+                             raw ratio the model can threshold wherever the
+                             data supports.
+    """
+    extension_ratio = (macd_line.abs() / hist_scale).replace([np.inf, -np.inf], np.nan)
+    hist_norm = (hist / hist_scale).replace([np.inf, -np.inf], np.nan)
+    return hist_norm, extension_ratio
+
+
+def _rsi_continuous_features(rsi):
+    """
+    Continuous replacements for the old binary is_rsi_under_50_and_rising:
+      rsi_distance_from_50 - signed distance below/above the midline (was a
+                              hard "< 50" cutoff) - how oversold, not just
+                              whether.
+      rsi_slope             - one-session change in RSI (was a hard
+                              "> previous session" cutoff) - how fast, not
+                              just whether rising.
+    """
+    return 50 - rsi, rsi.diff()
 
 
 def _fib_distances(high, low, close, lookback=FIB_LOOKBACK_DAYS):
@@ -305,7 +357,10 @@ def _ticker_price_features(g):
     rsi = _rsi(close)
     macd_line, signal_line, hist = _macd(close)
     days_since_cross = _days_since_bullish_crossover(macd_line, signal_line)
-    macd_state = _macd_state(macd_line, signal_line, hist, days_since_cross)
+    hist_scale = _macd_hist_scale(hist)
+    macd_state = _macd_state(macd_line, signal_line, hist, days_since_cross, hist_scale)
+    macd_hist_norm, macd_extension_ratio = _macd_continuous_features(macd_line, hist, hist_scale)
+    rsi_distance_from_50, rsi_slope = _rsi_continuous_features(rsi)
     pct_618, pct_50 = _fib_distances(high, low, close)
     vol_ratio = _volume_ratio(volume)
     momentum_20d = _momentum(close)
@@ -321,7 +376,11 @@ def _ticker_price_features(g):
         "date": g["date"].to_numpy(),
         "rsi_14": rsi.to_numpy(),
         "is_rsi_under_50_and_rising": ((rsi < 50) & (rsi > rsi.shift(1))).astype(int).to_numpy(),
+        "rsi_distance_from_50": rsi_distance_from_50.to_numpy(),
+        "rsi_slope": rsi_slope.to_numpy(),
         "macd_state": macd_state.to_numpy(),
+        "macd_hist_norm": macd_hist_norm.to_numpy(),
+        "macd_extension_ratio": macd_extension_ratio.to_numpy(),
         "days_since_macd_crossover": days_since_cross.to_numpy(),
         "pct_dist_to_fib_618": pct_618.to_numpy(),
         "pct_dist_to_fib_50": pct_50.to_numpy(),

@@ -34,15 +34,22 @@ from ml.features import FEATURE_COLUMNS
 N_SPLITS = 5
 PURGE_DAYS = 90
 
-# Hyperparameters tuned for a noisy, low-signal-to-noise financial dataset:
-# shallow trees and a low learning rate to resist fitting to noise, heavy
-# row/column subsampling for the same reason.
+# Hyperparameters found by ml/tune.py's purged-CV search over the
+# swing-trading-specific ranges (shallow trees, heavy subsampling, real
+# L1/L2 regularization, high min_child_weight) - see that module's
+# docstring. Winning search-phase AUC 0.522 (last-3-fold mean) vs ~0.51
+# for this project's original hand-picked values, which were less
+# regularized than this guidance recommends (subsample/colsample_bytree
+# too high, no min_child_weight, no reg_alpha/reg_lambda at all).
 XGB_PARAMS = dict(
-    max_depth=4,
-    learning_rate=0.03,
-    n_estimators=400,
-    subsample=0.8,
-    colsample_bytree=0.8,
+    max_depth=2,
+    learning_rate=0.005,
+    n_estimators=300,
+    subsample=0.5,
+    colsample_bytree=0.6,
+    min_child_weight=50,
+    reg_alpha=1,
+    reg_lambda=1,
     objective="binary:logistic",
     eval_metric="auc",
     random_state=42,

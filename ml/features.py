@@ -58,6 +58,7 @@ MOMENTUM_WINDOW = 20               # trading sessions - used for momentum_20d, s
 MOMENTUM_SHORT_WINDOW = 5
 MOMENTUM_LONG_WINDOW = 60
 VOLATILITY_WINDOW = 20
+VOLATILITY_REGIME_LONG_WINDOW = 60
 SWING_TRACK_LOOKBACK_DAYS = config.SWING_LOOKBACK_DAYS   # 63 - "track record" window for the swing-potential rule component
 SWING_REVERSAL_PCT = config.SWING_REVERSAL_PCT            # 4% - zigzag pivot threshold, same as the rule engine
 
@@ -110,6 +111,9 @@ FEATURE_COLUMNS = [
     "momentum_20d_rank",
     "volatility_20d_rank",
     "rule_composite_score",
+    # Round 3: volatility REGIME (is realized vol expanding vs. its own
+    # longer-run baseline), not just its absolute level.
+    "volatility_regime",
 ]
 
 
@@ -216,6 +220,20 @@ def _volatility(close, window=VOLATILITY_WINDOW):
     return close.pct_change().rolling(window, min_periods=window).std()
 
 
+def _volatility_regime(close, short_window=VOLATILITY_WINDOW, long_window=VOLATILITY_REGIME_LONG_WINDOW):
+    """
+    Short-run realized volatility relative to its own longer-run baseline
+    (20d vol / 60d vol) - a regime signal, not just a level: >1 means
+    volatility is currently EXPANDING relative to the last ~3 months
+    (breakout/blow-off conditions), <1 means it's CONTRACTING (a quiet,
+    coiling market). Two stocks with the same volatility_20d can be in
+    opposite regimes.
+    """
+    short_vol = _volatility(close, short_window)
+    long_vol = _volatility(close, long_window)
+    return short_vol / long_vol
+
+
 def _room_to_swing_high(high, close, lookback=SWING_TRACK_LOOKBACK_DAYS):
     """(recent swing high - close) / close - how much room is left to the local top, mirroring the rule engine's "room-to-target" half of swing potential."""
     swing_high = high.rolling(lookback, min_periods=lookback).max()
@@ -294,6 +312,7 @@ def _ticker_price_features(g):
     momentum_5d = _momentum(close, MOMENTUM_SHORT_WINDOW)
     momentum_60d = _momentum(close, MOMENTUM_LONG_WINDOW)
     volatility_20d = _volatility(close)
+    volatility_regime = _volatility_regime(close)
     room_to_swing_high = _room_to_swing_high(high, close)
     median_up_swing = _median_up_swing_pct(close)
 
@@ -311,6 +330,7 @@ def _ticker_price_features(g):
         "momentum_5d": momentum_5d.to_numpy(),
         "momentum_60d": momentum_60d.to_numpy(),
         "volatility_20d": volatility_20d.to_numpy(),
+        "volatility_regime": volatility_regime.to_numpy(),
         "room_to_swing_high_pct": room_to_swing_high.to_numpy(),
         "median_up_swing_pct": median_up_swing.to_numpy(),
     })

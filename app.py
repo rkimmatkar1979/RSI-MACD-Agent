@@ -135,7 +135,11 @@ else:
     COLOR_APP_BG = "#FAF6EC"
     COLOR_SECONDARY_BG = "#F2ECDD"
     COLOR_TEXT = "#000000"
-    COLOR_BORDER = "#FFFFFF"
+    # A white border here would be nearly invisible against the cream/white
+    # backgrounds this app uses in light mode (was #FFFFFF - looked like
+    # "no border" on cards, alerts, tables, inputs). A dark, high-contrast
+    # value actually delivers the flat/sharp look the CSS below intends.
+    COLOR_BORDER = "#33302A"
     COLOR_TABLE_BG = "#FFFFFF"
     COLOR_TABLE_TEXT = "#000000"
     COLOR_TABLE_GRID = "#000000"
@@ -238,6 +242,16 @@ st.markdown(
     div[data-baseweb="select"] > div,
     [data-testid="stTextInput"] input,
     [data-testid="stNumberInput"] input {{
+        border-radius: 0 !important;
+        border: 1px solid {COLOR_BORDER} !important;
+    }}
+
+    /* st.info/warning/error/success render their actual visible box (colour
+       tint + rounded corners) in a nested stAlertContainer child, not the
+       stAlert wrapper above - that wrapper is transparent with zero
+       padding, so a border on it alone is invisible. Square + border the
+       real box too, keeping its semantic tint (blue/red/green/yellow). */
+    [data-testid="stAlertContainer"] {{
         border-radius: 0 !important;
         border: 1px solid {COLOR_BORDER} !important;
     }}

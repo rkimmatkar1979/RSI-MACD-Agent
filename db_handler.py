@@ -873,6 +873,45 @@ def get_pending_ml_predictions():
         return pd.DataFrame()
 
 
+ML_PREDICTIONS_COLUMNS = [
+    "id", "prediction_date", "ticker", "model_path", "label_kind", "ml_confidence",
+    "entry_price", "entry_index_price", "tp_pct", "sl_pct", "max_days", "resolved",
+    "outcome", "resolved_date", "created_at", "sector", "xgb_score", "logistic_score",
+    "calibrated_probability", "lift_vs_baseline", "rank_all", "universe_size",
+    "rank_shortlist", "atr_pct", "volatility_20d", "momentum_5d", "momentum_20d",
+    "momentum_60d", "avg_traded_value_20d", "market_regime_json", "realized_return",
+    "days_held", "mfe_pct", "mae_pct",
+]
+
+
+def get_all_ml_predictions(model_path=None):
+    """
+    Returns every ml_predictions row (resolved and pending) as a DataFrame,
+    for forward-validation analysis (see ml.forward_validation) rather than
+    the resolver's own working set. Optionally filtered to one model_path -
+    the frozen model's live results shouldn't be silently pooled with an
+    older model's (e.g. v7's) history. Always carries the full column set
+    (see ML_PREDICTIONS_COLUMNS) even with zero matching rows - a bare
+    `pd.DataFrame([])` has no columns at all, which breaks any caller doing
+    `df["resolved"]` on a brand-new model with nothing logged yet. Empty
+    DataFrame (with columns) on error or no rows.
+    """
+    try:
+        with get_connection() as conn:
+            if model_path is None:
+                rows = conn.execute("SELECT * FROM ml_predictions").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM ml_predictions WHERE model_path = ?", (model_path,)
+                ).fetchall()
+        if not rows:
+            return pd.DataFrame(columns=ML_PREDICTIONS_COLUMNS)
+        return pd.DataFrame([dict(r) for r in rows])
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to fetch ml_predictions: {e}")
+        return pd.DataFrame(columns=ML_PREDICTIONS_COLUMNS)
+
+
 def mark_ml_predictions_resolved(updates):
     """
     updates: list of {"id": int, "outcome": 0 or 1, "resolved_date": "YYYY-MM-DD",

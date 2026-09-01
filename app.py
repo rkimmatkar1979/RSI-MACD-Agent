@@ -782,6 +782,18 @@ def _render_company_basics(basics):
         st.caption("Shareholding data not available.")
 
 
+@st.cache_data(ttl=config.PRICE_DATA_CACHE_TTL, show_spinner=False)
+def _load_forward_validation_report(model_path):
+    """Cached wrapper around ml.forward_validation.build_report - same reasoning as _score_shortlist_ml below (ml/ stays Streamlit-free)."""
+    from ml.forward_validation import build_report
+    try:
+        df = db_handler.get_all_ml_predictions(model_path=model_path)
+        return build_report(df)
+    except Exception as e:
+        print(f"[app] forward validation report failed: {e}")
+        return None
+
+
 @st.cache_data(ttl=config.PRICE_DATA_CACHE_TTL, show_spinner="Scoring ML confidence...")
 def _score_shortlist_ml(tickers, model_path):
     """Cached wrapper around ml.infer.score_tickers - ml/ itself stays free of
@@ -1032,7 +1044,10 @@ def _render_chart_analysis(sel_row, tp_price=None, sl_price=None):
         fig.update_yaxes(gridcolor=PLOTLY_GRID_COLOR, zerolinecolor=PLOTLY_ZERO_COLOR, tickfont=dict(color=PLOTLY_FONT_COLOR))
         fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1, secondary_y=True)
         fig.update_xaxes(title_text="Date", tickformat="%d %b %Y", row=3, col=1)
-        st.plotly_chart(fig, use_container_width=True)
+        # scrollZoom=False so a mouse-wheel/trackpad scroll over the chart
+        # scrolls the page as normal instead of zooming the chart - click-drag
+        # box zoom, double-click reset, and pinch-zoom (touch) still work.
+        st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": False})
 
         # --- Metrics row 1, with arrows showing current MACD movement -----------
         macd_now = float(chart_df["MACD"].iloc[-1])
@@ -1727,6 +1742,75 @@ if can_use_admin_tools and ML_PREDICTIONS_TAB_ENABLED:
                                 f"target ₹{_row['tp_price']:.2f} / stop ₹{_row['sl_price']:.2f}, {int(_row['max_days'])} "
                                 f"trading days) breaks even at a **{_row['breakeven_win_rate']:.0%} win rate** — "
                                 f"this score is **{_breakeven_word} breakeven**, before costs/slippage/gaps."
+                            )
+
+                st.markdown("---")
+                st.markdown("### 📊 Forward validation — live paper-trading results")
+                st.caption(
+                    "How this model's actual daily picks have performed, not the historical "
+                    "backtest above — the real test of whether the OOF edge survives live data."
+                )
+
+                _fv_report = (
+                    _load_forward_validation_report(_selected_model_path) if active_tab == TAB_ML else None
+                )
+                if _fv_report is None:
+                    st.info("Could not load the paper-trading log - see terminal/console for details.")
+                else:
+                    _s = _fv_report["summary"]
+                    if _s["total_logged"] == 0:
+                        st.info("No paper-trading log for this model yet - it hasn't been scored by the daily job.")
+                    elif _s["resolved_n"] == 0:
+                        st.info(
+                            f"{_s['pending_n']} pick(s) logged so far, none resolved yet "
+                            "(21-day holding period — check back after some time)."
+                        )
+                    else:
+                        if _fv_report["preliminary"]:
+                            st.warning(
+                                f"Only {_s['resolved_n']} resolved prediction(s) so far — too few to "
+                                "draw conclusions from. Shown for transparency, not as a signal."
+                            )
+                        f1, f2, f3, f4 = st.columns(4)
+                        f1.metric("Resolved / Pending", f"{_s['resolved_n']} / {_s['pending_n']}")
+                        f2.metric("Live win rate", f"{_s['win_rate']:.0%}")
+                        f3.metric("Breakeven win rate", f"{_s['breakeven_win_rate']:.0%}")
+                        f4.metric("Live EV / trade", f"{_s['ev_pct']:+.2%}")
+                        if _fv_report["calibration_error"] is not None:
+                            st.caption(f"Live calibration error (ECE): {_fv_report['calibration_error']:.3f}")
+
+                        def _render_breakdown_table(title, help_text, rows):
+                            st.markdown(f"**{title}**")
+                            if not rows:
+                                st.caption("Not enough resolved data yet.")
+                                return
+                            _bdf = pd.DataFrame(rows)
+                            _cols = [c for c in ["bucket", "n", "win_rate", "avg_predicted", "gap", "ev_pct", "enough_data"] if c in _bdf.columns]
+                            st.dataframe(_bdf[_cols], use_container_width=True, hide_index=True)
+                            if help_text:
+                                st.caption(help_text)
+
+                        with st.expander("📐 Calibration — does a predicted X% actually win X% of the time?", expanded=False):
+                            _render_breakdown_table(
+                                "Predicted vs. actual win rate, by probability bucket",
+                                "`gap` = actual − predicted. Positive means the model is under-confident live, negative means over-confident.",
+                                _fv_report["calibration"],
+                            )
+
+                        with st.expander("🏆 Does the top-ranked pick each day outperform?", expanded=False):
+                            _render_breakdown_table(
+                                "Win rate by rank within that day's shortlist",
+                                None, _fv_report["precision_by_rank"],
+                            )
+
+                        with st.expander("🔎 Where does the edge actually show up?", expanded=False):
+                            _render_breakdown_table("By sector", None, _fv_report["by_sector"])
+                            _render_breakdown_table("By volatility (ATR%)", None, _fv_report["by_volatility"])
+                            _render_breakdown_table("By momentum (20d)", None, _fv_report["by_momentum"])
+                            _render_breakdown_table("By liquidity (20d avg traded value)", None, _fv_report["by_liquidity"])
+                            _render_breakdown_table(
+                                "By market regime (India VIX, relative to this log's own history)",
+                                None, _fv_report["by_market_regime"],
                             )
 
 # ---------------------------------------------------------------------------

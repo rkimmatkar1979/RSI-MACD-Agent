@@ -31,6 +31,11 @@ def generate_daily_shortlist(live_features_df, model_path, top_pct=DEFAULT_TOP_P
     could silently return zero stocks on many days. `min_proba` is an
     optional secondary floor (e.g. 0.5) if you also want to require the
     model lean positive, not just be relatively better than its peers.
+
+    If the bundle has a "logistic_model" key (saved by
+    ml.train.train_and_save_ensemble_model), blends XGBoost's and the
+    logistic model's predictions using the bundle's own "ensemble_weight" -
+    single-model bundles (no "logistic_model" key) score exactly as before.
     """
     bundle = joblib.load(model_path)
     model, feature_cols = bundle["model"], bundle["feature_columns"]
@@ -40,6 +45,10 @@ def generate_daily_shortlist(live_features_df, model_path, top_pct=DEFAULT_TOP_P
         raise ValueError(f"live_features_df is missing model features: {missing}")
 
     proba = model.predict_proba(live_features_df[feature_cols])[:, 1]
+    if "logistic_model" in bundle:
+        w = bundle["ensemble_weight"]
+        logistic_proba = bundle["logistic_model"].predict_proba(live_features_df[feature_cols])[:, 1]
+        proba = w * proba + (1 - w) * logistic_proba
 
     result = live_features_df.copy()
     result["ml_confidence"] = proba

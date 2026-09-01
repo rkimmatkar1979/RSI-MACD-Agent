@@ -197,6 +197,68 @@ def run_cross_validation(feature_df, label_col="target", feature_cols=FEATURE_CO
     return fold_aucs, oof_df, baseline_fold_aucs
 
 
+def run_cross_validation_ensemble(feature_df, label_col="target", feature_cols=FEATURE_COLUMNS,
+                                   purge_days=PURGE_DAYS, xgb_params=XGB_PARAMS, ensemble_weight=0.7):
+    """
+    Same purged-CV loop as run_cross_validation, but blends each fold's
+    XGBoost and logistic-baseline predictions (ensemble_weight on XGBoost,
+    1-ensemble_weight on logistic) into ONE out-of-fold probability per
+    row, rather than treating the logistic fit as a diagnostic-only
+    baseline. XGBoost is always fit with use_scale_pos_weight=False here -
+    the ensemble was only ever validated with it disabled (see this
+    session's A/B test), not with it on.
+
+    Returns (blend_fold_aucs, oof_df, xgb_only_fold_aucs) - oof_df's
+    y_pred_proba column is the BLENDED probability, ready to feed straight
+    into calibration_table()/isotonic_calibration() so the calibration
+    curve reflects what actually gets shipped, not the XGBoost-only output.
+    xgb_only_fold_aucs is kept for the printed fold-by-fold comparison.
+    """
+    df = feature_df.sort_values("date").reset_index(drop=True)
+    X, y = df[feature_cols], df[label_col]
+
+    blend_fold_aucs, xgb_only_fold_aucs = [], []
+    oof_parts = []
+    for fold, (train_idx, test_idx, n_purged) in enumerate(purged_time_series_splits(df["date"], purge_days=purge_days), start=1):
+        X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
+        X_test, y_test = X.iloc[test_idx], y.iloc[test_idx]
+
+        if len(X_train) == 0 or y_train.nunique() < 2 or y_test.nunique() < 2:
+            print(f"[fold {fold}] skipped - insufficient class variety after purging "
+                  f"(train={len(X_train)}, test={len(X_test)})")
+            continue
+
+        xgb_model = _fit_one_fold(X_train, y_train, xgb_params=xgb_params, use_scale_pos_weight=False)
+        xgb_proba = xgb_model.predict_proba(X_test)[:, 1]
+        xgb_auc = roc_auc_score(y_test, xgb_proba)
+        xgb_only_fold_aucs.append(xgb_auc)
+
+        log_model = _fit_logistic_baseline(X_train, y_train)
+        log_proba = log_model.predict_proba(X_test)[:, 1]
+
+        blend_proba = ensemble_weight * xgb_proba + (1 - ensemble_weight) * log_proba
+        blend_auc = roc_auc_score(y_test, blend_proba)
+        blend_fold_aucs.append(blend_auc)
+
+        print(f"[fold {fold}] train={len(X_train)} (purged {n_purged} rows) test={len(X_test)} "
+              f"xgb_auc={xgb_auc:.4f} blend_auc={blend_auc:.4f} ({'+' if blend_auc >= xgb_auc else ''}{blend_auc - xgb_auc:.4f})")
+
+        fold_out = df.loc[test_idx, ["ticker", "date"]].copy() if "ticker" in df.columns else pd.DataFrame(index=test_idx)
+        fold_out["y_true"] = y_test.to_numpy()
+        fold_out["y_pred_proba"] = blend_proba
+        oof_parts.append(fold_out)
+
+    if blend_fold_aucs:
+        print(f"Mean OOF AUC: xgb-only={np.mean(xgb_only_fold_aucs):.4f} (+/- {np.std(xgb_only_fold_aucs):.4f}) "
+              f"| blend={np.mean(blend_fold_aucs):.4f} (+/- {np.std(blend_fold_aucs):.4f})")
+    else:
+        print("No folds produced a valid AUC - check class balance / data volume.")
+
+    oof_df = pd.concat(oof_parts, ignore_index=True) if oof_parts else pd.DataFrame(
+        columns=["ticker", "date", "y_true", "y_pred_proba"])
+    return blend_fold_aucs, oof_df, xgb_only_fold_aucs
+
+
 def precision_at_k(oof_df, k_fracs=(0.05, 0.1, 0.2)):
     """
     For each fraction in k_fracs: takes the top-k% of oof_df by predicted
@@ -420,3 +482,107 @@ def train_and_save_model(feature_df, model_path, label_col="target", feature_col
     print(f"\nSaved model to {model_path}")
     print(f"Saved diagnostics to {diagnostics_path(model_path)}")
     return final_model
+
+
+def train_and_save_ensemble_model(feature_df, model_path, label_col="target", feature_cols=FEATURE_COLUMNS,
+                                   label_kind="absolute", purge_days=PURGE_DAYS, label_config=None,
+                                   xgb_params=XGB_PARAMS, ensemble_weight=0.7):
+    """
+    Same shape/outputs as train_and_save_model(), but for an XGBoost +
+    logistic-regression BLEND rather than XGBoost alone - only use this
+    after a fold-by-fold robustness check on the blend weight (a pooled/
+    average AUC improvement isn't enough on its own, see this session's
+    ensemble validation). Always runs with use_scale_pos_weight=False (the
+    ensemble was only validated that way).
+
+    Saves {"model", "logistic_model", "ensemble_weight", "feature_columns"}
+    - ml.infer.score_tickers()/generate_daily_shortlist() detect the
+      "logistic_model" key and blend automatically; single-model bundles
+      from train_and_save_model() are unaffected and keep working as-is.
+
+    Calibration (calibration_table/isotonic_calibration) is fit on the
+    BLENDED out-of-fold predictions, not XGBoost's alone, so the
+    calibration curve matches what actually gets shipped.
+    """
+    df = feature_df.dropna(subset=[label_col]).sort_values("date").reset_index(drop=True)
+    if df.empty:
+        raise ValueError("No labeled rows to train on after dropping unresolved/NaN targets.")
+
+    print(f"Training ensemble on {len(df)} labeled rows ({df[label_col].mean():.1%} positive) "
+          f"spanning {df['date'].min().date()} to {df['date'].max().date()} (ensemble_weight={ensemble_weight})")
+
+    fold_aucs, oof_df, xgb_only_fold_aucs = run_cross_validation_ensemble(
+        df, label_col=label_col, feature_cols=feature_cols, purge_days=purge_days,
+        xgb_params=xgb_params, ensemble_weight=ensemble_weight)
+
+    precision_stats = precision_at_k(oof_df)
+    if precision_stats:
+        print("\nPrecision at top-K (out-of-fold, blended):")
+        for k, stats in precision_stats.items():
+            print(f"  {k}: precision={stats['precision']:.1%} vs base_rate={stats['base_rate']:.1%} "
+                  f"(lift={stats['lift']:.2f}x, n={stats['n']})")
+
+    _lc = label_config or {}
+    calibration = calibration_table(oof_df, tp_pct=_lc.get("tp_pct"), sl_pct=_lc.get("sl_pct"))
+    breakeven_win_rate = (
+        _lc["sl_pct"] / (_lc["tp_pct"] + _lc["sl_pct"])
+        if "tp_pct" in _lc and "sl_pct" in _lc else None
+    )
+    if calibration:
+        print(f"\nCalibration ({len(calibration)} score bins, out-of-fold, blended)"
+              + (f" - breakeven win rate {breakeven_win_rate:.1%}:" if breakeven_win_rate is not None else ":"))
+        for b in calibration:
+            print(f"  [{b['low']:.3f}, {b['high']:.3f}] n={b['n']:>6d} win_rate={b['win_rate']:.1%} lift={b['lift']:.2f}x"
+                  + (f" ev={b['expected_value']:+.2%}" if "expected_value" in b else ""))
+
+    oof_base_rate = float(oof_df["y_true"].mean()) if not oof_df.empty else None
+    isotonic_curve = isotonic_calibration(oof_df)
+    if isotonic_curve:
+        print(f"\nIsotonic calibration fit on {len(oof_df)} blended OOF predictions "
+              f"({len(isotonic_curve)} breakpoints).")
+
+    X_full, y_full = df[feature_cols], df[label_col]
+    final_xgb = XGBClassifier(scale_pos_weight=1.0, **xgb_params)
+    final_xgb.fit(X_full, y_full)
+    final_logistic = _fit_logistic_baseline(X_full, y_full)
+
+    importance = print_feature_importance(final_xgb, feature_cols)
+
+    os.makedirs(os.path.dirname(model_path) or ".", exist_ok=True)
+    joblib.dump({
+        "model": final_xgb,
+        "logistic_model": final_logistic,
+        "ensemble_weight": ensemble_weight,
+        "feature_columns": list(feature_cols),
+    }, model_path)
+
+    diagnostics = {
+        "trained_at": pd.Timestamp.now(tz="UTC").isoformat(),
+        "label_kind": label_kind,
+        "label_config": label_config,
+        "purge_days": purge_days,
+        "xgb_params": xgb_params,
+        "ensemble_weight": ensemble_weight,
+        "n_rows": int(len(df)),
+        "positive_rate": float(df[label_col].mean()),
+        "date_range": [str(df["date"].min().date()), str(df["date"].max().date())],
+        "n_tickers": int(df["ticker"].nunique()) if "ticker" in df.columns else None,
+        "fold_aucs": [float(a) for a in fold_aucs],
+        "mean_auc": float(np.mean(fold_aucs)) if fold_aucs else None,
+        "std_auc": float(np.std(fold_aucs)) if fold_aucs else None,
+        "xgb_only_fold_aucs": [float(a) for a in xgb_only_fold_aucs],
+        "xgb_only_mean_auc": float(np.mean(xgb_only_fold_aucs)) if xgb_only_fold_aucs else None,
+        "feature_importance": {k: float(v) for k, v in importance.items()},
+        "precision_at_k": precision_stats,
+        "calibration": calibration,
+        "breakeven_win_rate": breakeven_win_rate,
+        "isotonic_calibration": isotonic_curve,
+        "oof_base_rate": oof_base_rate,
+        "use_scale_pos_weight": False,
+    }
+    with open(diagnostics_path(model_path), "w") as f:
+        json.dump(diagnostics, f, indent=2)
+
+    print(f"\nSaved ensemble model to {model_path}")
+    print(f"Saved diagnostics to {diagnostics_path(model_path)}")
+    return final_xgb, final_logistic

@@ -159,6 +159,20 @@ REGIME_FEATURE_COLUMNS = [
     "market_breadth_50dma",
 ]
 
+# Targeted subset of REGIME_FEATURE_COLUMNS - the full 7-feature group's
+# ablation result was inconclusive (mixed fold direction, destabilized the
+# logistic baseline), plausibly from multicollinearity among the 4
+# Nifty-specific features (its own momentum/SMA-distance/volatility are all
+# mechanically correlated with each other and with India VIX). This subset
+# drops those 4 and keeps only the least-correlated, most-distinct signals:
+# India VIX's own level/change, and market breadth (a cross-sectional
+# measure with no direct Nifty-index counterpart in this feature set).
+TARGETED_REGIME_FEATURE_COLUMNS = [
+    "india_vix",
+    "india_vix_change_5d",
+    "market_breadth_50dma",
+]
+
 
 def _rsi(close, period=RSI_PERIOD):
     """Wilder's RSI, vectorized over the full series (see ta_engine.calculate_rsi for the single-value equivalent)."""

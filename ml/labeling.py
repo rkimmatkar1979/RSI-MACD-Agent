@@ -124,6 +124,109 @@ def _ticker_relative_triple_barrier(g, tp_pct, sl_pct, max_days):
     return g[["ticker", "date", "target"]]
 
 
+def _ticker_relative_triple_barrier_detail(g, tp_pct, sl_pct, max_days):
+    g = g.sort_values("date").reset_index(drop=True)
+    dates = g["date"].to_numpy("datetime64[ns]")
+    close = g["close"].to_numpy(dtype=float)
+    index_close = g["index_close"].to_numpy(dtype=float)
+    n = len(g)
+
+    target = np.full(n, np.nan)
+    resolved_date = np.full(n, np.datetime64("NaT"), dtype="datetime64[ns]")
+    days_held = np.full(n, np.nan)
+    realized_return = np.full(n, np.nan)
+    mfe = np.full(n, np.nan)
+    mae = np.full(n, np.nan)
+    last_date = dates[-1] if n else None
+    horizon = np.timedelta64(max_days, "D")
+
+    for i in range(n):
+        entry_price = close[i]
+        entry_index = index_close[i]
+        deadline = dates[i] + horizon
+
+        resolved = False
+        running_max, running_min = -np.inf, np.inf
+        j = i + 1
+        while j < n and dates[j] <= deadline:
+            excess = (close[j] / entry_price) / (index_close[j] / entry_index) - 1
+            running_max = max(running_max, excess)
+            running_min = min(running_min, excess)
+            if excess <= -sl_pct or excess >= tp_pct:
+                target[i] = 0.0 if excess <= -sl_pct else 1.0
+                resolved_date[i] = dates[j]
+                days_held[i] = (dates[j] - dates[i]) / np.timedelta64(1, "D")
+                realized_return[i] = excess
+                resolved = True
+                break
+            j += 1
+
+        if not resolved and deadline <= last_date:
+            k = j - 1
+            target[i] = 0.0
+            resolved_date[i] = dates[k]
+            days_held[i] = (dates[k] - dates[i]) / np.timedelta64(1, "D")
+            realized_return[i] = (close[k] / entry_price) / (index_close[k] / entry_index) - 1
+        # else: still censored - target and every detail field stay NaN/NaT
+
+        if not np.isnan(target[i]):
+            if running_max > -np.inf:
+                mfe[i] = running_max
+            if running_min < np.inf:
+                mae[i] = running_min
+
+    g["target"] = target
+    g["resolved_date"] = resolved_date
+    g["days_held"] = days_held
+    g["realized_return"] = realized_return
+    g["mfe_pct"] = mfe
+    g["mae_pct"] = mae
+    return g[["ticker", "date", "target", "resolved_date", "days_held", "realized_return", "mfe_pct", "mae_pct"]]
+
+
+def resolve_relative_triple_barrier_detail(price_df, index_df, tp_pct=TAKE_PROFIT_PCT, sl_pct=STOP_LOSS_PCT, max_days=MAX_HOLDING_DAYS):
+    """
+    Paper-trading resolution helper: same barrier logic as
+    relative_triple_barrier_labels(), but for every row also reports
+    resolved_date, days_held, realized_return (the actual excess return at
+    the moment/day the barrier was touched or the window timed out - not
+    just which barrier "won"), and the path's maximum favorable/adverse
+    excursion (mfe_pct/mae_pct - the best and worst excess return reached
+    at any point before resolution). Rows whose window isn't fully covered
+    by price_df yet are left entirely NaN/NaT (still censored), same
+    convention as relative_triple_barrier_labels().
+
+    Not used by training (which only needs the plain 0/1/NaN target) - this
+    is for ml.paper_trade to record richer outcome data once a logged pick
+    resolves.
+    """
+    required = {"ticker", "date", "close"}
+    missing = required - set(price_df.columns)
+    if missing:
+        raise ValueError(f"price_df missing required columns: {sorted(missing)}")
+    if not {"date", "close"}.issubset(index_df.columns):
+        raise ValueError("index_df must have columns: date, close")
+
+    df = price_df.copy()
+    df["date"] = pd.to_datetime(df["date"])
+
+    idx = index_df[["date", "close"]].rename(columns={"close": "index_close"}).copy()
+    idx["date"] = pd.to_datetime(idx["date"])
+    idx = idx.sort_values("date")
+
+    df = df.merge(idx, on="date", how="inner")
+
+    empty = pd.DataFrame(columns=["ticker", "date", "target", "resolved_date", "days_held", "realized_return", "mfe_pct", "mae_pct"])
+    if df.empty:
+        return empty
+
+    parts = [
+        _ticker_relative_triple_barrier_detail(g, tp_pct, sl_pct, max_days)
+        for _, g in df.groupby("ticker", sort=False)
+    ]
+    return pd.concat(parts, ignore_index=True) if parts else empty
+
+
 def relative_triple_barrier_labels(price_df, index_df, tp_pct=TAKE_PROFIT_PCT, sl_pct=STOP_LOSS_PCT, max_days=MAX_HOLDING_DAYS):
     """
     Same triple-barrier construction as triple_barrier_labels(), but the

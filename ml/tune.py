@@ -68,10 +68,11 @@ def _scale_pos_weight(y):
     return neg / pos if pos else 1.0
 
 
-def _fit_eval(params, X_train, y_train, X_test, y_test):
+def _fit_eval(params, X_train, y_train, X_test, y_test, use_scale_pos_weight=True):
+    spw = _scale_pos_weight(y_train) if use_scale_pos_weight else 1.0
     model = XGBClassifier(
         objective="binary:logistic", eval_metric="auc", random_state=42, n_jobs=-1,
-        scale_pos_weight=_scale_pos_weight(y_train), **params,
+        scale_pos_weight=spw, **params,
     )
     model.fit(X_train, y_train)
     proba = model.predict_proba(X_test)[:, 1]
@@ -79,7 +80,7 @@ def _fit_eval(params, X_train, y_train, X_test, y_test):
 
 
 def search(feature_df, label_col="target", feature_cols=FEATURE_COLUMNS, n_iter=20, n_folds=3,
-           random_state=42, purge_days=MAX_HOLDING_DAYS):
+           random_state=42, purge_days=MAX_HOLDING_DAYS, use_scale_pos_weight=True):
     """Returns a list of (mean_auc, params) sorted best-first. purge_days should match the label's own max_days horizon (see ml.train.run_cross_validation)."""
     df = feature_df.dropna(subset=[label_col]).sort_values("date").reset_index(drop=True)
     X, y = df[feature_cols], df[label_col]
@@ -96,7 +97,7 @@ def search(feature_df, label_col="target", feature_cols=FEATURE_COLUMNS, n_iter=
             X_test, y_test = X.iloc[test_idx], y.iloc[test_idx]
             if y_train.nunique() < 2 or y_test.nunique() < 2:
                 continue
-            fold_scores.append(_fit_eval(params, X_train, y_train, X_test, y_test))
+            fold_scores.append(_fit_eval(params, X_train, y_train, X_test, y_test, use_scale_pos_weight=use_scale_pos_weight))
 
         mean_auc = float(np.mean(fold_scores)) if fold_scores else float("nan")
         print(f"[{i}/{len(sampler)}] AUC={mean_auc:.4f}  {params}")

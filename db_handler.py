@@ -236,7 +236,26 @@ def init_db():
                     resolved INTEGER NOT NULL DEFAULT 0,
                     outcome INTEGER,
                     resolved_date TEXT,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    sector TEXT,
+                    xgb_score REAL,
+                    logistic_score REAL,
+                    calibrated_probability REAL,
+                    lift_vs_baseline REAL,
+                    rank_all INTEGER,
+                    universe_size INTEGER,
+                    rank_shortlist INTEGER,
+                    atr_pct REAL,
+                    volatility_20d REAL,
+                    momentum_5d REAL,
+                    momentum_20d REAL,
+                    momentum_60d REAL,
+                    avg_traded_value_20d REAL,
+                    market_regime_json TEXT,
+                    realized_return REAL,
+                    days_held REAL,
+                    mfe_pct REAL,
+                    mae_pct REAL
                 )
             """)
             conn.execute("""
@@ -274,6 +293,33 @@ def init_db():
             ):
                 if col not in existing_cols:
                     conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {col_type}")
+
+            # Migration: add Phase 3 forward-validation columns to an
+            # ml_predictions table created before they existed.
+            existing_ml_cols = {row["name"] for row in conn.execute("PRAGMA table_info(ml_predictions)")}
+            for col, col_type in (
+                ("sector", "TEXT"),
+                ("xgb_score", "REAL"),
+                ("logistic_score", "REAL"),
+                ("calibrated_probability", "REAL"),
+                ("lift_vs_baseline", "REAL"),
+                ("rank_all", "INTEGER"),
+                ("universe_size", "INTEGER"),
+                ("rank_shortlist", "INTEGER"),
+                ("atr_pct", "REAL"),
+                ("volatility_20d", "REAL"),
+                ("momentum_5d", "REAL"),
+                ("momentum_20d", "REAL"),
+                ("momentum_60d", "REAL"),
+                ("avg_traded_value_20d", "REAL"),
+                ("market_regime_json", "TEXT"),
+                ("realized_return", "REAL"),
+                ("days_held", "REAL"),
+                ("mfe_pct", "REAL"),
+                ("mae_pct", "REAL"),
+            ):
+                if col not in existing_ml_cols:
+                    conn.execute(f"ALTER TABLE ml_predictions ADD COLUMN {col} {col_type}")
     except _DB_ERRORS as e:
         print(f"[db_handler] Failed to initialize database: {e}")
         raise
@@ -756,10 +802,16 @@ def save_ml_predictions(rows):
     Persists a batch of ML paper-trade picks. Each row is a dict with keys
     matching the ml_predictions columns (prediction_date, ticker, model_path,
     label_kind, ml_confidence, entry_price, entry_index_price, tp_pct,
-    sl_pct, max_days, created_at). INSERT OR IGNORE against the
-    (prediction_date, ticker, model_path) unique index, so re-saving the
-    same day's picks (e.g. a second "Run Full Scan Now" click) is a safe
-    no-op rather than a duplicate or an overwrite.
+    sl_pct, max_days, created_at, plus the Phase 3 forward-validation
+    fields: sector, xgb_score, logistic_score, calibrated_probability,
+    lift_vs_baseline, rank_all, universe_size, rank_shortlist, atr_pct,
+    volatility_20d, momentum_5d, momentum_20d, momentum_60d,
+    avg_traded_value_20d, market_regime_json - all optional/None-able, so
+    older callers or single-model bundles without a logistic component
+    still work). INSERT OR IGNORE against the (prediction_date, ticker,
+    model_path) unique index, so re-saving the same day's picks (e.g. a
+    second "Run Full Scan Now" click) is a safe no-op rather than a
+    duplicate or an overwrite.
 
     Returns the number of rows attempted (not the number actually inserted -
     the underlying libsql/sqlite3 cursor types used by get_connection()
@@ -767,6 +819,15 @@ def save_ml_predictions(rows):
     """
     if not rows:
         return 0
+
+    def _f(r, key):
+        v = r.get(key)
+        return None if v is None else float(v)
+
+    def _i(r, key):
+        v = r.get(key)
+        return None if v is None else int(v)
+
     try:
         with get_connection() as conn:
             for r in rows:
@@ -775,15 +836,24 @@ def save_ml_predictions(rows):
                     INSERT OR IGNORE INTO ml_predictions (
                         prediction_date, ticker, model_path, label_kind, ml_confidence,
                         entry_price, entry_index_price, tp_pct, sl_pct, max_days,
-                        resolved, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                        resolved, created_at, sector, xgb_score, logistic_score,
+                        calibrated_probability, lift_vs_baseline, rank_all, universe_size,
+                        rank_shortlist, atr_pct, volatility_20d, momentum_5d, momentum_20d,
+                        momentum_60d, avg_traded_value_20d, market_regime_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         r["prediction_date"], r["ticker"], r["model_path"], r["label_kind"],
                         float(r["ml_confidence"]), float(r["entry_price"]),
-                        None if r["entry_index_price"] is None else float(r["entry_index_price"]),
+                        _f(r, "entry_index_price"),
                         float(r["tp_pct"]), float(r["sl_pct"]), int(r["max_days"]),
-                        r["created_at"],
+                        r["created_at"], r.get("sector"),
+                        _f(r, "xgb_score"), _f(r, "logistic_score"),
+                        _f(r, "calibrated_probability"), _f(r, "lift_vs_baseline"),
+                        _i(r, "rank_all"), _i(r, "universe_size"), _i(r, "rank_shortlist"),
+                        _f(r, "atr_pct"), _f(r, "volatility_20d"),
+                        _f(r, "momentum_5d"), _f(r, "momentum_20d"), _f(r, "momentum_60d"),
+                        _f(r, "avg_traded_value_20d"), r.get("market_regime_json"),
                     ),
                 )
         return len(rows)
@@ -805,7 +875,10 @@ def get_pending_ml_predictions():
 
 def mark_ml_predictions_resolved(updates):
     """
-    updates: list of {"id": int, "outcome": 0 or 1, "resolved_date": "YYYY-MM-DD"}.
+    updates: list of {"id": int, "outcome": 0 or 1, "resolved_date": "YYYY-MM-DD",
+    "realized_return": float|None, "days_held": float|None, "mfe_pct": float|None,
+    "mae_pct": float|None} - the last four are optional (older/absolute-label
+    predictions resolved without the detailed excursion data stay NULL).
     Batched in one connection block (all-or-nothing per call, matching this
     module's other multi-row writers like save_scan_results()).
     """
@@ -815,8 +888,20 @@ def mark_ml_predictions_resolved(updates):
         with get_connection() as conn:
             for u in updates:
                 conn.execute(
-                    "UPDATE ml_predictions SET resolved = 1, outcome = ?, resolved_date = ? WHERE id = ?",
-                    (int(u["outcome"]), u["resolved_date"], int(u["id"])),
+                    """
+                    UPDATE ml_predictions
+                    SET resolved = 1, outcome = ?, resolved_date = ?,
+                        realized_return = ?, days_held = ?, mfe_pct = ?, mae_pct = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        int(u["outcome"]), u["resolved_date"],
+                        None if u.get("realized_return") is None else float(u["realized_return"]),
+                        None if u.get("days_held") is None else float(u["days_held"]),
+                        None if u.get("mfe_pct") is None else float(u["mfe_pct"]),
+                        None if u.get("mae_pct") is None else float(u["mae_pct"]),
+                        int(u["id"]),
+                    ),
                 )
     except _DB_ERRORS as e:
         print(f"[db_handler] Failed to mark ml_predictions resolved: {e}")

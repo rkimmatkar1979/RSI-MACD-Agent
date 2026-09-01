@@ -323,6 +323,31 @@ def score_setup(analysis, sector_trend_pct):
 SECTOR_TREND_COLUMNS = ["sector", "trend_week_pct", "trend_month_pct"]
 
 
+def compute_market_regime(index_return, pct_sectors_positive):
+    """
+    Derives a simple, transparent Risk-On/Risk-Off/Mixed call for the
+    persistent context bar (see app.py) from two already-computed numbers:
+    the benchmark index's own recent return (ta_engine.get_index_return)
+    and the fraction of sectors with a positive week trend (from
+    sector_trend_df, see generate_shortlist above).
+
+    Requires BOTH signals to agree past config.MARKET_REGIME_INDEX_THRESHOLD
+    - a big index move on narrow breadth (or flat index despite broad
+    strength/weakness) reads as "Mixed" rather than forcing a call. Either
+    input being unavailable (None) also returns "Mixed" rather than
+    guessing. Returns (label, emoji).
+    """
+    if index_return is None or pct_sectors_positive is None:
+        return "Mixed", "🟡"
+
+    threshold = config.MARKET_REGIME_INDEX_THRESHOLD
+    if index_return >= threshold and pct_sectors_positive >= 0.5:
+        return "Risk-On", "🟢"
+    if index_return <= -threshold and pct_sectors_positive < 0.5:
+        return "Risk-Off", "🔴"
+    return "Mixed", "🟡"
+
+
 def generate_shortlist(tickers=None, progress_callback=None):
     """
     Scans `tickers` (defaults to config.SCAN_UNIVERSE, i.e. the Nifty 100

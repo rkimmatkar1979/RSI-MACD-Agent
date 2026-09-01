@@ -55,7 +55,7 @@ APP_TAGLINE = (
 )
 
 # Set to True to show the dark mode toggle in the sidebar.
-DARK_MODE_ENABLED = True
+DARK_MODE_ENABLED = False
 DARK_MODE_NOTICE = (
     "⚠️ Dark mode is currently under development. "
     "Some UI elements may not appear as intended."
@@ -146,6 +146,14 @@ SECTOR_TREND_MONTH_DAYS = 21           # ~1 trading month
 # ai_analyst._format_news, which fetches per-stock headlines.
 MARKET_NEWS_TICKERS = ["^NSEI", "^BSESN"]
 
+# Persistent context bar (top of every tab) - market regime call.
+# Risk-On/Risk-Off requires BOTH the index's own SECTOR_TREND_WEEK_DAYS
+# return past this threshold AND a majority of sectors agreeing in that
+# same direction; anything else (including a strong index move on weak
+# breadth, or vice versa) reads as "Mixed" - see strategy.compute_market_regime.
+MARKET_REGIME_INDEX_TICKER = "^NSEI"
+MARKET_REGIME_INDEX_THRESHOLD = 0.005   # 0.5% index move over SECTOR_TREND_WEEK_DAYS
+
 # Swing potential - is this stock actually capable of a worthwhile swing-
 # trade move, regardless of whether RSI/MACD are currently confirming a
 # reversal? Blends (a) room between current price and the recent swing high
@@ -194,7 +202,7 @@ CHART_DISPLAY_MONTHS = 3
 # {"model", "messages", "temperature"} shape.
 LLM_API_KEY = _get_setting("LLM_API_KEY", "")
 LLM_API_URL = _get_setting("LLM_API_URL", "https://api.groq.com/openai/v1/chat/completions")
-LLM_MODEL = _get_setting("LLM_MODEL", "llama-3.3-70b-versatile")
+LLM_MODEL = _get_setting("LLM_MODEL", "openai/gpt-oss-120b")
 LLM_TIMEOUT_SECONDS = 60
 
 # How many top-ranked shortlist entries get a full Entry/SL/TP write-up.

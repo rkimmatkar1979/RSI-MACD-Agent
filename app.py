@@ -22,35 +22,73 @@ import db_handler
 import fundamentals
 from ai_analyst import get_ai_recommendations
 from ml.train import load_diagnostics
-from scheduler import is_market_open, run_pipeline
-from strategy import generate_shortlist
+from scheduler import is_market_open, maybe_auto_scan, run_pipeline
+from strategy import compute_market_regime, generate_shortlist
 from ta_engine import (
     calculate_buy_sell_pressure,
     calculate_volume_metrics,
     describe_macd_pattern,
     get_chart_data,
+    get_index_return,
     get_reference_session,
     nearest_fib_level,
 )
 
-@st.cache_data(show_spinner=False)
-def _df_to_styled_excel(df: pd.DataFrame) -> bytes:
-    """Return a .xlsx file bytes with black cells and white text."""
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    black_fill = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
+# Shared style objects (not re-created per cell - see _write_excel_sheet)
+# for the app's black-cell/white-text Excel export look.
+_EXCEL_FILL = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
+_EXCEL_HEADER_FONT = Font(color="FFFFFF", bold=True)
+_EXCEL_BODY_FONT = Font(color="FFFFFF")
+_EXCEL_HEADER_ALIGN = Alignment(horizontal="center")
+
+
+def _write_excel_sheet(ws, df):
+    """Writes `df` into worksheet `ws`: black cells, white text, bold
+    centered header row. list/dict cell values are stringified first -
+    openpyxl can't store them directly (e.g. the Shortlist sheet's
+    `reasons` column)."""
     for col_idx, col_name in enumerate(df.columns, 1):
-        cell = ws.cell(row=1, column=col_idx, value=col_name)
-        cell.fill = black_fill
-        cell.font = Font(color="FFFFFF", bold=True)
-        cell.alignment = Alignment(horizontal="center")
+        cell = ws.cell(row=1, column=col_idx, value=str(col_name))
+        cell.fill = _EXCEL_FILL
+        cell.font = _EXCEL_HEADER_FONT
+        cell.alignment = _EXCEL_HEADER_ALIGN
     for row_idx, row in enumerate(df.itertuples(index=False), 2):
         for col_idx, value in enumerate(row, 1):
             if isinstance(value, (list, dict)):
                 value = str(value)
             cell = ws.cell(row=row_idx, column=col_idx, value=value)
-            cell.fill = black_fill
-            cell.font = Font(color="FFFFFF")
+            cell.fill = _EXCEL_FILL
+            cell.font = _EXCEL_BODY_FONT
+
+
+def _text_to_df(text, column_name="Text"):
+    """Splits freeform text (AI commentary/outlook markdown) into one row
+    per line - a plain readable dump, not a markdown parse, for a text-only
+    Excel sheet."""
+    lines = (text or "Not available for this date.").split("\n")
+    return pd.DataFrame({column_name: lines})
+
+
+@st.cache_data(show_spinner=False)
+def _build_consolidated_excel(shortlist_df, sector_trend_df, sector_outlook_text, ai_commentary_text):
+    """
+    One workbook, one sheet per Shortlist-tab dataset: Shortlist (every
+    scanned/shortlisted stock, all computed fields), Sector Trends
+    (week/month, full scan universe), AI Sector Outlook, and AI Commentary
+    (per-stock write-ups) - a single "download everything" button instead
+    of a separate export per section. Cached on the exact data passed in,
+    so re-rendering without new data doesn't rebuild the file.
+    """
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    sheets = {
+        "Shortlist": shortlist_df,
+        "Sector Trends": sector_trend_df,
+        "AI Sector Outlook": _text_to_df(sector_outlook_text),
+        "AI Commentary": _text_to_df(ai_commentary_text),
+    }
+    for name, df in sheets.items():
+        _write_excel_sheet(wb.create_sheet(title=name[:31]), df)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -74,7 +112,7 @@ st.set_page_config(
 # A widget's session_state entry is dropped if the widget isn't instantiated
 # on a run, which was silently resetting dark mode back to light once those
 # pages finished. "dark_mode_pref" isn't tied to any widget, so it survives.
-dark_mode = st.session_state.get("dark_mode_pref", False)
+dark_mode = config.DARK_MODE_ENABLED and st.session_state.get("dark_mode_pref", False)
 
 # Colour tokens shared by the CSS below, the Shortlist/Custom Analysis tables
 # (pandas Styler), and the Plotly chart layouts - keeping a single
@@ -443,6 +481,17 @@ latest = db_handler.get_latest_scan()
 available_dates = db_handler.get_available_scan_dates()
 scan_timestamps = db_handler.get_scan_timestamps()
 
+# "No scheduling infra" workaround - whoever loads the app first each
+# trading day with no scan yet recorded kicks off that day's scan in the
+# background (see scheduler.maybe_auto_scan). Non-blocking: this page load
+# still renders normally below with whatever's already in `latest`/`available_dates`.
+if maybe_auto_scan():
+    st.toast(
+        "🔄 Today's scan just started in the background — check back in a "
+        "few minutes for fresh results.",
+        icon="🔄",
+    )
+
 # ---------------------------------------------------------------------------
 # Sidebar - controls
 # ---------------------------------------------------------------------------
@@ -457,15 +506,16 @@ with st.sidebar:
 
     st.header("Controls")
 
-    st.toggle(
-        "🌙 Dark mode",
-        value=dark_mode,
-        key="dark_mode",
-        on_change=lambda: st.session_state.update(dark_mode_pref=st.session_state["dark_mode"]),
-    )
+    if config.DARK_MODE_ENABLED:
+        st.toggle(
+            "🌙 Dark mode",
+            value=dark_mode,
+            key="dark_mode",
+            on_change=lambda: st.session_state.update(dark_mode_pref=st.session_state["dark_mode"]),
+        )
 
-    if dark_mode:
-        st.info(config.DARK_MODE_NOTICE, icon=None)
+        if dark_mode:
+            st.info(config.DARK_MODE_NOTICE, icon=None)
 
 
     if config.AUTH_ENABLED:
@@ -542,12 +592,54 @@ if latest is None:
     )
     st.stop()
 
-scan_date, ai_commentary, signals_df = latest
+latest_scan_date, ai_commentary, signals_df = latest
+scan_date = latest_scan_date
 
 if selected_date and selected_date != scan_date:
     result = db_handler.get_scan_by_date(selected_date)
     if result is not None:
         scan_date, ai_commentary, signals_df = result
+
+# ---------------------------------------------------------------------------
+# Persistent context bar - market-wide orientation, rendered above the tabs
+# below so it stays visible regardless of which tab is active. Always
+# reflects the LATEST scan/live data (latest_scan_date), not whatever
+# historical scan_date the sidebar selector above picked for the tab
+# content - this bar is "where are we right now", the tabs are "what did
+# this specific scan find".
+# ---------------------------------------------------------------------------
+_context_sector_trends = db_handler.get_sector_trends(latest_scan_date)
+if not _context_sector_trends.empty:
+    _index_return = get_index_return()
+    _pct_sectors_positive = (_context_sector_trends["trend_week_pct"] > 0).mean()
+    _regime_label, _regime_emoji = compute_market_regime(_index_return, _pct_sectors_positive)
+    _top_sector_row = _context_sector_trends.loc[_context_sector_trends["trend_week_pct"].idxmax()]
+    _bottom_sector_row = _context_sector_trends.loc[_context_sector_trends["trend_week_pct"].idxmin()]
+    _last_sync = scan_timestamps.get(latest_scan_date, latest_scan_date)
+
+    with st.container(border=True):
+        cb1, cb2, cb3, cb4 = st.columns([1.2, 1.4, 1.4, 1.3])
+        with cb1:
+            st.caption("Market Regime")
+            st.markdown(
+                f"**{_regime_emoji} {_regime_label}**",
+                help=(
+                    f"Needs BOTH {config.MARKET_REGIME_INDEX_TICKER}'s own "
+                    f"{config.SECTOR_TREND_WEEK_DAYS}-session return past "
+                    f"±{config.MARKET_REGIME_INDEX_THRESHOLD * 100:.1f}% AND a majority of "
+                    "sectors agreeing in that direction to call Risk-On/Risk-Off - "
+                    "anything else (including no index data) reads as Mixed."
+                ),
+            )
+        with cb2:
+            st.caption(f"Top Sector ({config.SECTOR_TREND_WEEK_DAYS}D)")
+            st.markdown(f"**{_top_sector_row['sector']}**  :green[{_top_sector_row['trend_week_pct'] * 100:+.2f}%]")
+        with cb3:
+            st.caption(f"Bottom Sector ({config.SECTOR_TREND_WEEK_DAYS}D)")
+            st.markdown(f"**{_bottom_sector_row['sector']}**  :red[{_bottom_sector_row['trend_week_pct'] * 100:+.2f}%]")
+        with cb4:
+            st.caption("Last Sync")
+            st.markdown(f"**{_last_sync}**")
 
 # ---------------------------------------------------------------------------
 # Main views - split into tabs so the page isn't one long scroll. This also
@@ -659,6 +751,19 @@ def _style_macd_diff(val):
         return "color: #2e8b57; font-weight: 600"
     if diff < 0:
         return "color: #c0392b; font-weight: 600"
+    return ""
+
+
+def _style_pct_sign(val):
+    """Background-color a signed percentage cell: green if positive, red if negative."""
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return ""
+    if v > 0:
+        return "background-color: #d4edda; color: #155724; font-weight: 600"
+    if v < 0:
+        return "background-color: #f8d7da; color: #721c24; font-weight: 600"
     return ""
 
 
@@ -1208,6 +1313,22 @@ with tab_shortlist:
     if _scan_ts:
         st.caption(f"Last updated: {_scan_ts}")
 
+    if not signals_df.empty:
+        _excel_shortlist_df = signals_df.assign(
+            reasons=signals_df["reasons"].apply(lambda r: "; ".join(r) if r else "-")
+        )
+        st.download_button(
+            "📥 Download Consolidated Excel (Shortlist + Sector Data + AI Commentary)",
+            data=_build_consolidated_excel(
+                _excel_shortlist_df,
+                db_handler.get_sector_trends(scan_date),
+                db_handler.get_sector_outlook(scan_date),
+                ai_commentary,
+            ),
+            file_name=f"swingedge_report_{scan_date}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
     with st.expander(
         f"📐 How the score is calculated (max "
         f"{config.SCORE_FIB_KEY_LEVEL + config.SCORE_RSI_EXTREME + config.SCORE_MACD_PROXIMITY + config.SCORE_SWING_POTENTIAL + config.SCORE_SECTOR_TREND})",
@@ -1237,90 +1358,105 @@ stock's own signals.
     if signals_df.empty:
         st.info("No stocks met the scoring threshold on this date.")
     else:
-        # --- Sector outlook: last week vs. last month, full scan universe ---
-        # Unlike the heatmap below (shortlist-only, 10D), this covers every
-        # sector that was scanned that day, so a sector with zero qualifying
-        # setups still shows up - see strategy.generate_shortlist's
-        # sector_trend_df and db_handler.get_sector_trends/get_sector_outlook.
-        st.markdown("**Sector outlook — last week vs. last month**")
-        full_sector_trend_df = db_handler.get_sector_trends(scan_date)
-        if full_sector_trend_df.empty:
-            st.caption(
-                "No sector trend history for this date (this panel was added "
-                "after this scan was recorded - re-run a scan to populate it)."
+        # --- Sector Intelligence: quant data and the AI narrative live in
+        # separate tabs so switching to "Quantitative" hides the AI text
+        # entirely for anyone who just wants the raw numbers, instead of
+        # everything being stacked in one long scroll. --------------------
+        st.markdown("### 🧭 Sector Intelligence")
+        quant_tab, ai_tab = st.tabs(["📊 Quantitative", "🔮 AI Rotation Call"])
+
+        with quant_tab:
+            # --- Sector outlook: last week vs. last month, full scan universe -
+            # Unlike the heatmap below (shortlist-only, 10D), this covers every
+            # sector that was scanned that day, so a sector with zero qualifying
+            # setups still shows up - see strategy.generate_shortlist's
+            # sector_trend_df and db_handler.get_sector_trends.
+            st.markdown("**Sector outlook — last week vs. last month**")
+            full_sector_trend_df = db_handler.get_sector_trends(scan_date)
+            if full_sector_trend_df.empty:
+                st.caption(
+                    "No sector trend history for this date (this panel was added "
+                    "after this scan was recorded - re-run a scan to populate it)."
+                )
+            else:
+                week_col = f"Last {config.SECTOR_TREND_WEEK_DAYS} Sessions (~1W)"
+                month_col = f"Last {config.SECTOR_TREND_MONTH_DAYS} Sessions (~1M)"
+                trend_table_df = (
+                    full_sector_trend_df
+                    .sort_values("trend_week_pct", ascending=False)
+                    .rename(columns={
+                        "sector": "Sector",
+                        "trend_week_pct": week_col,
+                        "trend_month_pct": month_col,
+                    })
+                )
+                trend_table_df[week_col] = (trend_table_df[week_col] * 100).round(2)
+                trend_table_df[month_col] = (trend_table_df[month_col] * 100).round(2)
+                styled_trend_table = (
+                    trend_table_df.style.set_properties(**{
+                        "background-color": COLOR_TABLE_BG,
+                        "color": COLOR_TABLE_TEXT,
+                        "border": f"1px solid {COLOR_TABLE_GRID}",
+                    })
+                    .map(_style_pct_sign, subset=[week_col, month_col])
+                    .format({week_col: "{:+.2f}%", month_col: "{:+.2f}%"})
+                )
+                st.dataframe(styled_trend_table, use_container_width=True, hide_index=True)
+                st.caption(
+                    "🟩 positive / 🟥 negative return, sorted by last week's trend "
+                    "(strongest first) - averaged across every sector in the full "
+                    "scan universe, not just this shortlist."
+                )
+
+            # --- Sector trend heatmap -----------------------------------------
+            # One cell per sector represented in this shortlist (not the full
+            # scan universe) - a quick read on which sectors are rotating in/out
+            # of favour, using the same sector_trend_pct fed into Score component 5.
+            st.markdown("**Sector trend snapshot**")
+            sector_trend_df = (
+                signals_df[["sector", "sector_trend_pct"]]
+                .drop_duplicates(subset="sector")
+                .sort_values("sector_trend_pct", ascending=False)
             )
-        else:
-            trend_bar_df = full_sector_trend_df.sort_values("trend_week_pct", ascending=True)
-            trend_bar_fig = go.Figure()
-            trend_bar_fig.add_trace(go.Bar(
-                y=trend_bar_df["sector"], x=(trend_bar_df["trend_week_pct"] * 100).round(2),
-                name=f"Last {config.SECTOR_TREND_WEEK_DAYS} sessions (~1W)",
-                orientation="h", marker_color="#4C78A8",
+            sector_names = sector_trend_df["sector"].tolist()
+            sector_values = (sector_trend_df["sector_trend_pct"] * 100).round(2).tolist()
+            heatmap_fig = go.Figure(data=go.Heatmap(
+                z=[sector_values],
+                x=sector_names,
+                y=[""],
+                colorscale="RdYlGn",
+                zmid=0,
+                text=[[f"{v:+.2f}%" for v in sector_values]],
+                texttemplate="%{text}",
+                hovertemplate="%{x}: %{z:+.2f}%<extra></extra>",
+                colorbar=dict(title="%", thickness=12, len=0.7),
             ))
-            trend_bar_fig.add_trace(go.Bar(
-                y=trend_bar_df["sector"], x=(trend_bar_df["trend_month_pct"] * 100).round(2),
-                name=f"Last {config.SECTOR_TREND_MONTH_DAYS} sessions (~1M)",
-                orientation="h", marker_color="#B0B8C1",
-            ))
-            trend_bar_fig.update_layout(
-                barmode="group",
-                height=max(220, 32 * len(trend_bar_df)),
-                margin=dict(l=10, r=10, t=10, b=10),
-                xaxis_title="Return %",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            heatmap_fig.update_layout(
+                height=150,
+                margin=dict(l=10, r=10, t=10, b=30),
+                yaxis=dict(showticklabels=False),
                 paper_bgcolor=PLOTLY_PAPER_BG,
                 plot_bgcolor=PLOTLY_PLOT_BG,
                 font_color=PLOTLY_FONT_COLOR,
             )
-            trend_bar_fig.update_xaxes(gridcolor=PLOTLY_GRID_COLOR, zerolinecolor=PLOTLY_ZERO_COLOR)
-            st.plotly_chart(trend_bar_fig, use_container_width=True)
+            st.plotly_chart(heatmap_fig, use_container_width=True)
+            st.caption(
+                f"Average {config.SECTOR_TREND_LOOKBACK_DAYS}-day return of all scanned "
+                "stocks in each sector represented in this shortlist - green = sector "
+                "trending up, red = trending down (see Score component 5 above)."
+            )
 
+        with ai_tab:
             sector_outlook_text = db_handler.get_sector_outlook(scan_date)
             if sector_outlook_text:
-                with st.expander("🔮 AI sector-rotation call (which sectors look set to rise/fall)", expanded=False):
-                    st.caption(
-                        "Generated once per scan from the trend numbers above plus "
-                        "recent Nifty/Sensex headlines - a directional read, not a guarantee."
-                    )
-                    st.markdown(sector_outlook_text)
-
-        # --- Sector trend heatmap -------------------------------------------
-        # One cell per sector represented in this shortlist (not the full
-        # scan universe) - a quick read on which sectors are rotating in/out
-        # of favour, using the same sector_trend_pct fed into Score component 5.
-        st.markdown("**Sector trend snapshot**")
-        sector_trend_df = (
-            signals_df[["sector", "sector_trend_pct"]]
-            .drop_duplicates(subset="sector")
-            .sort_values("sector_trend_pct", ascending=False)
-        )
-        sector_names = sector_trend_df["sector"].tolist()
-        sector_values = (sector_trend_df["sector_trend_pct"] * 100).round(2).tolist()
-        heatmap_fig = go.Figure(data=go.Heatmap(
-            z=[sector_values],
-            x=sector_names,
-            y=[""],
-            colorscale="RdYlGn",
-            zmid=0,
-            text=[[f"{v:+.2f}%" for v in sector_values]],
-            texttemplate="%{text}",
-            hovertemplate="%{x}: %{z:+.2f}%<extra></extra>",
-            colorbar=dict(title="%", thickness=12, len=0.7),
-        ))
-        heatmap_fig.update_layout(
-            height=150,
-            margin=dict(l=10, r=10, t=10, b=30),
-            yaxis=dict(showticklabels=False),
-            paper_bgcolor=PLOTLY_PAPER_BG,
-            plot_bgcolor=PLOTLY_PLOT_BG,
-            font_color=PLOTLY_FONT_COLOR,
-        )
-        st.plotly_chart(heatmap_fig, use_container_width=True)
-        st.caption(
-            f"Average {config.SECTOR_TREND_LOOKBACK_DAYS}-day return of all scanned "
-            "stocks in each sector represented in this shortlist - green = sector "
-            "trending up, red = trending down (see Score component 5 above)."
-        )
+                st.caption(
+                    "Generated once per scan from the trend numbers in the "
+                    "Quantitative tab plus recent Nifty/Sensex headlines - a "
+                    "directional read, not a guarantee."
+                )
+                st.markdown(sector_outlook_text)
+            else:
+                st.caption("No AI sector-rotation call available for this date.")
 
         # --- Day-over-day diff vs the previous retained scan ----------------
         # SCAN_HISTORY_RETENTION_DAYS bounds how far back `available_dates`
@@ -1431,20 +1567,10 @@ stock's own signals.
         if _search:
             display_df = display_df[display_df["Ticker"].str.contains(_search, na=False)]
 
-        col_check, col_download = st.columns([3, 1])
-        with col_check:
-            show_all_cols = st.checkbox(
-                "Show all columns (52W high, volume, buy/sell pressure, sector trend)",
-                value=False,
-            )
-        with col_download:
-            st.download_button(
-                "📥 Download Excel",
-                data=_df_to_styled_excel(display_df),
-                file_name=f"nifty100_shortlist_{scan_date}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                width="stretch",
-            )
+        show_all_cols = st.checkbox(
+            "Show all columns (52W high, volume, buy/sell pressure, sector trend)",
+            value=False,
+        )
         table_df = display_df if show_all_cols else display_df[compact_columns]
 
         # With all columns shown, let the table keep its natural (wider)

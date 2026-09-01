@@ -21,13 +21,24 @@ import yfinance as yf
 import config
 
 
+def is_trading_day():
+    """
+    Returns True on weekdays (Mon-Fri, IST). Does NOT account for NSE
+    market holidays (not tracked anywhere in this app) - a simple weekday
+    check, used to decide whether an auto-scan should fire today (see
+    scheduler.maybe_auto_scan) and by is_market_open() below.
+    """
+    tz = pytz.timezone(config.MARKET_TIMEZONE)
+    return datetime.now(tz).weekday() < 5  # Saturday=5, Sunday=6
+
+
 def is_market_open():
     """Returns True if it is currently within NSE trading hours on a weekday (IST)."""
+    if not is_trading_day():
+        return False
+
     tz = pytz.timezone(config.MARKET_TIMEZONE)
     now = datetime.now(tz)
-
-    if now.weekday() >= 5:  # Saturday=5, Sunday=6
-        return False
 
     open_h, open_m = (int(x) for x in config.MARKET_OPEN_TIME.split(":"))
     close_h, close_m = (int(x) for x in config.MARKET_CLOSE_TIME.split(":"))
@@ -381,6 +392,19 @@ def calculate_return(df, window=config.SECTOR_TREND_LOOKBACK_DAYS):
     latest_close = float(df["Close"].iloc[-1])
     past_close = float(df["Close"].iloc[-1 - window])
     return (latest_close - past_close) / past_close if past_close else 0.0
+
+
+def get_index_return(window=config.SECTOR_TREND_WEEK_DAYS, ticker=config.MARKET_REGIME_INDEX_TICKER):
+    """
+    Returns the benchmark index's own close-to-close return over the last
+    `window` sessions (decimal fraction), or None if the index data isn't
+    available - used alongside sector breadth to derive the market regime
+    shown in the persistent context bar (see strategy.compute_market_regime).
+    """
+    df = fetch_data(ticker)
+    if df is None:
+        return None
+    return calculate_return(df, window=window)
 
 
 def calculate_buy_sell_pressure(df, window=config.BUY_SELL_PRESSURE_WINDOW):

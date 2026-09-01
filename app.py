@@ -370,6 +370,7 @@ if st.session_state.get("scan_in_progress"):
         db_handler.get_available_scan_dates.clear()
         db_handler.get_scan_by_date.clear()
         db_handler.get_scan_timestamps.clear()
+        db_handler.get_score_history.clear()
         st.session_state.pop("date_select", None)
         db_handler.log_event(
             st.session_state.get("_user_email", ""),

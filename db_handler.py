@@ -9,6 +9,7 @@ Schema:
 """
 
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -94,6 +95,17 @@ class _TursoConnection:
 
     def execute(self, sql, params=()):
         return _CursorResult(self._client.execute(sql, list(params)))
+
+    def execute_batch(self, stmts):
+        """Executes a list of (sql, params) statements as a single
+        all-or-nothing unit via Hrana's batch API. Unlike execute(), which
+        commits each statement immediately (see class docstring), the batch
+        endpoint wraps every step in a server-side BEGIN/COMMIT with an
+        automatic ROLLBACK if any step fails - real atomicity, still over
+        plain HTTP. Use for any multi-statement write where a partial
+        failure would leave the DB in an inconsistent state (e.g. deleting
+        old rows before inserting their replacements)."""
+        self._client.batch([(sql, list(params)) for sql, params in stmts])
 
     def commit(self):
         pass
@@ -325,6 +337,21 @@ def init_db():
         raise
 
 
+def _run_atomic(conn, stmts):
+    """Executes a list of (sql, params) statements as a single all-or-nothing
+    unit. On Turso this goes through _TursoConnection.execute_batch (the
+    Hrana batch API - real atomicity over HTTP, since individual execute()
+    calls there commit immediately and can't be rolled back, see
+    _TursoConnection's docstring). On local SQLite, get_connection()'s own
+    commit()/rollback() already makes the surrounding `with` block atomic,
+    so this just runs the statements in order."""
+    if isinstance(conn, _TursoConnection):
+        conn.execute_batch(stmts)
+    else:
+        for sql, params in stmts:
+            conn.execute(sql, params)
+
+
 def save_scan_results(shortlist_df, ai_commentary, universe_size):
     """
     Persists a scan's shortlist + AI commentary under today's date.
@@ -333,79 +360,95 @@ def save_scan_results(shortlist_df, ai_commentary, universe_size):
     signals for that date and overwrites the scan row, so the user never
     accumulates duplicate alerts for the same day.
 
+    All statements (today's delete+inserts, plus pruning old scans past
+    SCAN_HISTORY_RETENTION_DAYS) are built up front and only then executed
+    as one atomic batch (see _run_atomic) - so a bad value in one shortlist
+    row raises before anything touches the DB, and a mid-write failure
+    (e.g. a network blip) can't leave today's signals deleted but only
+    partially replaced.
+
     Returns the scan_date (YYYY-MM-DD) the results were saved under.
     """
     scan_date = datetime.now().strftime("%Y-%m-%d")
     scan_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    stmts = [
+        ("DELETE FROM signals WHERE scan_date = ?", (scan_date,)),
+        (
+            """
+            INSERT OR REPLACE INTO scans
+                (scan_date, scan_timestamp, ai_commentary, universe_size, shortlist_size)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (scan_date, scan_timestamp, ai_commentary, universe_size, len(shortlist_df)),
+        ),
+    ]
+
+    for _, row in shortlist_df.iterrows():
+        stmts.append((
+            """
+            INSERT INTO signals (
+                scan_date, ticker, sector, close_price, rsi, macd_line, macd_signal,
+                macd_hist, macd_hist_direction, nearest_fib_level, nearest_fib_price,
+                fib_distance_pct, fib_high, fib_low, week52_high, week52_low,
+                pct_from_52w_high, macd_pattern, volume_ratio, avg_volume_20,
+                buy_pct, sell_pct, sector_trend_pct, prev_session_date,
+                prev_session_open, prev_session_close, score, reasons
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                scan_date,
+                row["ticker"],
+                row["sector"],
+                float(row["close"]),
+                float(row["rsi"]),
+                float(row["macd_line"]),
+                float(row["macd_signal"]),
+                float(row["macd_hist"]),
+                row["macd_hist_direction"],
+                row["nearest_fib_level"],
+                float(row["nearest_fib_price"]),
+                float(row["fib_distance_pct"]),
+                float(row["fib_high"]),
+                float(row["fib_low"]),
+                float(row["week52_high"]),
+                float(row["week52_low"]),
+                float(row["pct_from_52w_high"]),
+                row["macd_pattern"],
+                float(row["volume_ratio"]),
+                float(row["avg_volume_20"]),
+                float(row["buy_pct"]),
+                float(row["sell_pct"]),
+                float(row["sector_trend_pct"]),
+                row["prev_session_date"],
+                float(row["prev_session_open"]),
+                float(row["prev_session_close"]),
+                int(row["score"]),
+                json.dumps(row["reasons"]),
+            ),
+        ))
+
     try:
         with get_connection() as conn:
-            conn.execute("DELETE FROM signals WHERE scan_date = ?", (scan_date,))
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO scans
-                    (scan_date, scan_timestamp, ai_commentary, universe_size, shortlist_size)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (scan_date, scan_timestamp, ai_commentary, universe_size, len(shortlist_df)),
-            )
-
-            for _, row in shortlist_df.iterrows():
-                conn.execute(
-                    """
-                    INSERT INTO signals (
-                        scan_date, ticker, sector, close_price, rsi, macd_line, macd_signal,
-                        macd_hist, macd_hist_direction, nearest_fib_level, nearest_fib_price,
-                        fib_distance_pct, fib_high, fib_low, week52_high, week52_low,
-                        pct_from_52w_high, macd_pattern, volume_ratio, avg_volume_20,
-                        buy_pct, sell_pct, sector_trend_pct, prev_session_date,
-                        prev_session_open, prev_session_close, score, reasons
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        scan_date,
-                        row["ticker"],
-                        row["sector"],
-                        float(row["close"]),
-                        float(row["rsi"]),
-                        float(row["macd_line"]),
-                        float(row["macd_signal"]),
-                        float(row["macd_hist"]),
-                        row["macd_hist_direction"],
-                        row["nearest_fib_level"],
-                        float(row["nearest_fib_price"]),
-                        float(row["fib_distance_pct"]),
-                        float(row["fib_high"]),
-                        float(row["fib_low"]),
-                        float(row["week52_high"]),
-                        float(row["week52_low"]),
-                        float(row["pct_from_52w_high"]),
-                        row["macd_pattern"],
-                        float(row["volume_ratio"]),
-                        float(row["avg_volume_20"]),
-                        float(row["buy_pct"]),
-                        float(row["sell_pct"]),
-                        float(row["sector_trend_pct"]),
-                        row["prev_session_date"],
-                        float(row["prev_session_open"]),
-                        float(row["prev_session_close"]),
-                        int(row["score"]),
-                        json.dumps(row["reasons"]),
-                    ),
-                )
-
             # Keep only the SCAN_HISTORY_RETENTION_DAYS most recent scan
             # dates - older scans (and their signals) are deleted so the
             # day-over-day diff and score-history sparkline always have a
-            # bounded amount of data to read.
-            old_dates = [
+            # bounded amount of data to read. Computed from the pre-write
+            # state (today's date excluded, in case this is a same-day
+            # re-run) since today's own INSERT hasn't happened yet - today
+            # always occupies one slot of the retention budget.
+            existing_dates = [
                 r["scan_date"] for r in conn.execute(
                     "SELECT scan_date FROM scans ORDER BY scan_date DESC"
                 ).fetchall()
-            ][config.SCAN_HISTORY_RETENTION_DAYS:]
+            ]
+            other_dates = [d for d in existing_dates if d != scan_date]
+            old_dates = other_dates[max(0, config.SCAN_HISTORY_RETENTION_DAYS - 1):]
             for old_date in old_dates:
-                conn.execute("DELETE FROM signals WHERE scan_date = ?", (old_date,))
-                conn.execute("DELETE FROM scans WHERE scan_date = ?", (old_date,))
+                stmts.append(("DELETE FROM signals WHERE scan_date = ?", (old_date,)))
+                stmts.append(("DELETE FROM scans WHERE scan_date = ?", (old_date,)))
+
+            _run_atomic(conn, stmts)
         return scan_date
     except _DB_ERRORS as e:
         print(f"[db_handler] Failed to save scan results: {e}")
@@ -895,6 +938,12 @@ def get_all_ml_predictions(model_path=None):
     `pd.DataFrame([])` has no columns at all, which breaks any caller doing
     `df["resolved"]` on a brand-new model with nothing logged yet. Empty
     DataFrame (with columns) on error or no rows.
+
+    model_path is normalized (os.path.normpath) before the lookup:
+    ml.paper_trade stores it via os.path.join (backslashes on Windows), but
+    app.py's model picker builds its path from glob.glob("ml/models/...")
+    (forward slashes even on Windows) - a plain string-equality WHERE would
+    silently match zero rows for every model on Windows without this.
     """
     try:
         with get_connection() as conn:
@@ -902,7 +951,7 @@ def get_all_ml_predictions(model_path=None):
                 rows = conn.execute("SELECT * FROM ml_predictions").fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM ml_predictions WHERE model_path = ?", (model_path,)
+                    "SELECT * FROM ml_predictions WHERE model_path = ?", (os.path.normpath(model_path),)
                 ).fetchall()
         if not rows:
             return pd.DataFrame(columns=ML_PREDICTIONS_COLUMNS)

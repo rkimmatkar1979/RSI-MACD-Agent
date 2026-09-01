@@ -194,7 +194,7 @@ CHART_DISPLAY_MONTHS = 3
 # {"model", "messages", "temperature"} shape.
 LLM_API_KEY = _get_setting("LLM_API_KEY", "")
 LLM_API_URL = _get_setting("LLM_API_URL", "https://api.groq.com/openai/v1/chat/completions")
-LLM_MODEL = _get_setting("LLM_MODEL", "llama-3.3-70b-versatile")
+LLM_MODEL = _get_setting("LLM_MODEL", "openai/gpt-oss-120b")
 LLM_TIMEOUT_SECONDS = 60
 
 # How many top-ranked shortlist entries get a full Entry/SL/TP write-up.

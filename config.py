@@ -132,6 +132,20 @@ BUY_SELL_PRESSURE_WINDOW = 20          # sessions to look back
 SECTOR_TREND_LOOKBACK_DAYS = 10        # ~2 trading weeks
 SECTOR_TREND_THRESHOLD = 0.015         # 1.5% minimum move for bonus to apply
 
+# Sector trend snapshot (Shortlist tab, above the heatmap) - separate from
+# SECTOR_TREND_LOOKBACK_DAYS above (which only feeds Score component 5 and is
+# averaged over the shortlist). These two windows are purely informational,
+# averaged across every sector in the FULL scan universe (not just
+# shortlisted stocks), so every sector shows up even on a day it produced no
+# qualifying setups.
+SECTOR_TREND_WEEK_DAYS = 5             # ~1 trading week
+SECTOR_TREND_MONTH_DAYS = 21           # ~1 trading month
+
+# Index-level tickers used for the market-wide news feeding the sector
+# forecast commentary (see ai_analyst.get_sector_outlook) - as opposed to
+# ai_analyst._format_news, which fetches per-stock headlines.
+MARKET_NEWS_TICKERS = ["^NSEI", "^BSESN"]
+
 # Swing potential - is this stock actually capable of a worthwhile swing-
 # trade move, regardless of whether RSI/MACD are currently confirming a
 # reversal? Blends (a) room between current price and the recent swing high

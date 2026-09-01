@@ -242,9 +242,34 @@ def main(model_path=DEFAULT_MODEL_PATH, top_pct=DEFAULT_TOP_PCT, period=DEFAULT_
     db_handler.init_db()
     tickers = tickers or config.SCAN_UNIVERSE
 
-    price_df = download_price_history(tickers, period=period, refresh_cache=True)
-    index_df = download_index_history(period=period, refresh_cache=True)
-    vix_df = download_vix_history(period=period, refresh_cache=True)
+    try:
+        price_df = download_price_history(tickers, period=period, refresh_cache=True)
+    except Exception as e:
+        print(f"[paper_trade] price history download failed - aborting today's run: {e}")
+        return
+    if price_df.empty:
+        print("[paper_trade] price history download returned no rows for any ticker - aborting today's run.")
+        return
+
+    try:
+        index_df = download_index_history(period=period, refresh_cache=True)
+    except Exception as e:
+        # Every downstream step (relative labels, resolution, scoring) needs
+        # the benchmark index, unlike VIX below - a failure here really does
+        # mean today's run can't do anything useful.
+        print(f"[paper_trade] benchmark index download failed - aborting today's run: {e}")
+        return
+
+    try:
+        vix_df = download_vix_history(period=period, refresh_cache=True)
+    except Exception as e:
+        # VIX only feeds optional regime metadata (see ml.features
+        # REGIME_FEATURE_COLUMNS, not in v8's actual feature set) -
+        # build_price_features_extended tolerates vix_df=None just fine, so
+        # a VIX-specific outage shouldn't block resolving or logging today's
+        # picks the way a price/index failure legitimately would.
+        print(f"[paper_trade] VIX download failed - continuing without regime metadata: {e}")
+        vix_df = None
 
     try:
         resolve_pending_picks(price_df, index_df)
@@ -260,8 +285,10 @@ def main(model_path=DEFAULT_MODEL_PATH, top_pct=DEFAULT_TOP_PCT, period=DEFAULT_
 def _safe_run(**kwargs):
     try:
         main(**kwargs)
-    except Exception as e:
-        print(f"[paper_trade] background run failed: {e}")
+    except Exception:
+        import traceback
+        print("[paper_trade] background run failed:")
+        traceback.print_exc()
 
 
 def run_in_background(**kwargs):

@@ -150,7 +150,8 @@ def init_db():
                     scan_timestamp TEXT NOT NULL,
                     ai_commentary TEXT,
                     universe_size INTEGER,
-                    shortlist_size INTEGER
+                    shortlist_size INTEGER,
+                    sector_outlook TEXT
                 )
             """)
             conn.execute("""
@@ -194,6 +195,20 @@ def init_db():
             conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_unique
                 ON signals(scan_date, ticker)
+            """)
+            # Full-universe sector trend snapshot (see
+            # strategy.generate_shortlist's sector_trend_df) - one row per
+            # sector present in that scan's tickers, regardless of whether
+            # any of that sector's stocks made the shortlist. Powers the
+            # week/month sector trend panel above the heatmap (app.py).
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sector_trends (
+                    scan_date TEXT NOT NULL,
+                    sector TEXT NOT NULL,
+                    trend_week_pct REAL,
+                    trend_month_pct REAL,
+                    PRIMARY KEY (scan_date, sector)
+                )
             """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS ai_commentary_cache (
@@ -279,6 +294,12 @@ def init_db():
                 ON ml_predictions(resolved)
             """)
 
+            # Migration: add sector_outlook to a scans table created before
+            # the sector-trend panel existed.
+            existing_scan_cols = {row["name"] for row in conn.execute("PRAGMA table_info(scans)")}
+            if "sector_outlook" not in existing_scan_cols:
+                conn.execute("ALTER TABLE scans ADD COLUMN sector_outlook TEXT")
+
             # Migration: add status to a table created by an older version.
             existing_user_cols = {row["name"] for row in conn.execute("PRAGMA table_info(authorized_users)")}
             if "status" not in existing_user_cols:
@@ -352,13 +373,19 @@ def _run_atomic(conn, stmts):
             conn.execute(sql, params)
 
 
-def save_scan_results(shortlist_df, ai_commentary, universe_size):
+def save_scan_results(shortlist_df, ai_commentary, universe_size, sector_trend_df=None, sector_outlook=None):
     """
-    Persists a scan's shortlist + AI commentary under today's date.
+    Persists a scan's shortlist + AI commentary + sector trend/outlook under
+    today's date.
 
     Re-running the pipeline on the same calendar date deletes the previous
-    signals for that date and overwrites the scan row, so the user never
-    accumulates duplicate alerts for the same day.
+    signals/sector_trends for that date and overwrites the scan row, so the
+    user never accumulates duplicate alerts for the same day.
+
+    sector_trend_df (columns: strategy.SECTOR_TREND_COLUMNS) and
+    sector_outlook (str, the LLM's sector-rotation commentary) are optional
+    so older/simpler callers (e.g. a bare shortlist save) still work -
+    sector_outlook stays NULL and no sector_trends rows are written.
 
     All statements (today's delete+inserts, plus pruning old scans past
     SCAN_HISTORY_RETENTION_DAYS) are built up front and only then executed
@@ -374,15 +401,26 @@ def save_scan_results(shortlist_df, ai_commentary, universe_size):
 
     stmts = [
         ("DELETE FROM signals WHERE scan_date = ?", (scan_date,)),
+        ("DELETE FROM sector_trends WHERE scan_date = ?", (scan_date,)),
         (
             """
             INSERT OR REPLACE INTO scans
-                (scan_date, scan_timestamp, ai_commentary, universe_size, shortlist_size)
-            VALUES (?, ?, ?, ?, ?)
+                (scan_date, scan_timestamp, ai_commentary, universe_size, shortlist_size, sector_outlook)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (scan_date, scan_timestamp, ai_commentary, universe_size, len(shortlist_df)),
+            (scan_date, scan_timestamp, ai_commentary, universe_size, len(shortlist_df), sector_outlook),
         ),
     ]
+
+    if sector_trend_df is not None:
+        for _, row in sector_trend_df.iterrows():
+            stmts.append((
+                """
+                INSERT INTO sector_trends (scan_date, sector, trend_week_pct, trend_month_pct)
+                VALUES (?, ?, ?, ?)
+                """,
+                (scan_date, row["sector"], float(row["trend_week_pct"]), float(row["trend_month_pct"])),
+            ))
 
     for _, row in shortlist_df.iterrows():
         stmts.append((
@@ -446,6 +484,7 @@ def save_scan_results(shortlist_df, ai_commentary, universe_size):
             old_dates = other_dates[max(0, config.SCAN_HISTORY_RETENTION_DAYS - 1):]
             for old_date in old_dates:
                 stmts.append(("DELETE FROM signals WHERE scan_date = ?", (old_date,)))
+                stmts.append(("DELETE FROM sector_trends WHERE scan_date = ?", (old_date,)))
                 stmts.append(("DELETE FROM scans WHERE scan_date = ?", (old_date,)))
 
             _run_atomic(conn, stmts)
@@ -614,6 +653,48 @@ def get_scan_by_date(scan_date):
         return scan_row["scan_date"], scan_row["ai_commentary"], _rows_to_signals_df(signal_rows)
     except _DB_ERRORS as e:
         print(f"[db_handler] Failed to fetch scan for {scan_date}: {e}")
+        return None
+
+
+SECTOR_TRENDS_COLUMNS = ["sector", "trend_week_pct", "trend_month_pct"]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_sector_trends(scan_date):
+    """
+    Returns a DataFrame (columns: SECTOR_TRENDS_COLUMNS) of every sector's
+    average week/month return for this scan date, sorted strongest week
+    first - covers every sector in the full scan universe, not just the
+    ones present in that date's shortlist (see
+    strategy.generate_shortlist's sector_trend_df). Empty DataFrame (with
+    columns) on error or no rows.
+    """
+    try:
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT sector, trend_week_pct, trend_month_pct FROM sector_trends "
+                "WHERE scan_date = ? ORDER BY trend_week_pct DESC",
+                (scan_date,),
+            ).fetchall()
+        if not rows:
+            return pd.DataFrame(columns=SECTOR_TRENDS_COLUMNS)
+        return pd.DataFrame([dict(r) for r in rows])
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to fetch sector trends for {scan_date}: {e}")
+        return pd.DataFrame(columns=SECTOR_TRENDS_COLUMNS)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_sector_outlook(scan_date):
+    """Returns the cached AI sector-rotation commentary for this scan date, or None."""
+    try:
+        with get_connection() as conn:
+            row = conn.execute(
+                "SELECT sector_outlook FROM scans WHERE scan_date = ?", (scan_date,)
+            ).fetchone()
+        return row["sector_outlook"] if row else None
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to fetch sector outlook for {scan_date}: {e}")
         return None
 
 

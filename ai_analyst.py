@@ -21,6 +21,20 @@ import db_handler
 import fundamentals
 from ta_engine import fetch_news
 
+TRADING_ANALYST_SYSTEM_PROMPT = (
+    "You are an expert quantitative swing-trading analyst covering "
+    "Indian equity markets (NSE). You write concise, specific, "
+    "actionable trade plans based strictly on the technical data "
+    "you are given."
+)
+
+MARKET_STRATEGIST_SYSTEM_PROMPT = (
+    "You are an expert market strategist covering Indian equities (NSE/BSE), "
+    "writing concise sector-rotation calls strictly grounded in the trend "
+    "data and news headlines you are given - never inventing figures or "
+    "events not present in them."
+)
+
 # Explanation of the decimal-valued columns sent to the AI, also surfaced to
 # the user in app.py so both sides interpret the numbers the same way.
 NOTATION_NOTE = (
@@ -259,9 +273,25 @@ def get_ai_recommendations(shortlist_df):
         "headlines."
     )
 
-    # If a previous scan sent this exact same shortlist/news data, reuse its
-    # commentary instead of calling the LLM again - the prompt (and therefore
-    # the analysis) would be identical.
+    try:
+        return _call_llm(prompt, TRADING_ANALYST_SYSTEM_PROMPT)
+    except (requests.exceptions.RequestException, KeyError, IndexError, ValueError) as e:
+        return f"{_llm_error_message(e)} The mathematical shortlist above is still valid."
+
+
+def _call_llm(prompt, system_message):
+    """
+    Sends `prompt` to the configured LLM and returns its response content as
+    plain text/markdown. Content-hash caching (db_handler.get_cached_ai_commentary,
+    scoped to today) means an identical prompt later the same day reuses the
+    prior result instead of calling the API again - shared by every caller
+    (get_ai_recommendations, get_sector_outlook) since they all hash+cache
+    the same way.
+
+    Raises requests.exceptions.RequestException / KeyError / IndexError /
+    ValueError on failure - callers translate that into a human-readable
+    fallback message via _llm_error_message().
+    """
     prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     cached = db_handler.get_cached_ai_commentary(prompt_hash)
     if cached is not None:
@@ -274,52 +304,102 @@ def get_ai_recommendations(shortlist_df):
     payload = {
         "model": config.LLM_MODEL,
         "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are an expert quantitative swing-trading analyst covering "
-                    "Indian equity markets (NSE). You write concise, specific, "
-                    "actionable trade plans based strictly on the technical data "
-                    "you are given."
-                ),
-            },
+            {"role": "system", "content": system_message},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.3,
     }
+    response = requests.post(
+        config.LLM_API_URL,
+        headers=headers,
+        json=payload,
+        timeout=config.LLM_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    data = response.json()
+    content = data["choices"][0]["message"]["content"].strip()
+    db_handler.save_ai_commentary_cache(prompt_hash, content)
+    return content
 
-    try:
-        response = requests.post(
-            config.LLM_API_URL,
-            headers=headers,
-            json=payload,
-            timeout=config.LLM_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
-        data = response.json()
-        content = data["choices"][0]["message"]["content"].strip()
-        db_handler.save_ai_commentary_cache(prompt_hash, content)
-        return content
 
-    except requests.exceptions.Timeout:
-        return (
-            "AI analysis unavailable: the LLM API request timed out. "
-            "The mathematical shortlist above is still valid."
-        )
-    except requests.exceptions.HTTPError as e:
+def _llm_error_message(e):
+    """Turns an exception raised by _call_llm into a human-readable fallback string."""
+    if isinstance(e, requests.exceptions.Timeout):
+        return "AI analysis unavailable: the LLM API request timed out."
+    if isinstance(e, requests.exceptions.HTTPError):
         try:
             detail = e.response.json().get("error", e.response.text)
         except ValueError:
             detail = e.response.text
-        return (
-            f"AI analysis unavailable: LLM API returned "
-            f"{e.response.status_code} error: {detail}. "
-            "The mathematical shortlist above is still valid."
+        return f"AI analysis unavailable: LLM API returned {e.response.status_code} error: {detail}."
+    if isinstance(e, requests.exceptions.RequestException):
+        return f"AI analysis unavailable: could not reach the LLM API ({e})."
+    return f"AI analysis unavailable: unexpected response format from LLM API ({e})."
+
+
+def _format_sector_trends(sector_trend_df):
+    """One line per sector: 'Sector: +x.xx% (1W), +y.yy% (1M)', strongest week first."""
+    lines = []
+    for _, row in sector_trend_df.sort_values("trend_week_pct", ascending=False).iterrows():
+        lines.append(
+            f"{row['sector']}: {row['trend_week_pct'] * 100:+.2f}% (1W), "
+            f"{row['trend_month_pct'] * 100:+.2f}% (1M)"
         )
-    except requests.exceptions.RequestException as e:
-        return (
-            f"AI analysis unavailable: could not reach the LLM API ({e}). "
-            "The mathematical shortlist above is still valid."
-        )
-    except (KeyError, IndexError, ValueError) as e:
-        return f"AI analysis unavailable: unexpected response format from LLM API ({e})."
+    return "\n".join(lines)
+
+
+def _format_market_news():
+    """Recent headlines for config.MARKET_NEWS_TICKERS (index-level, not per-stock)."""
+    lines = []
+    for ticker in config.MARKET_NEWS_TICKERS:
+        headlines = fetch_news(ticker)
+        if headlines:
+            lines.append(f"{ticker}:")
+            for headline in headlines:
+                lines.append(f"  - {headline}")
+    return "\n".join(lines) if lines else "(no recent index-level news available)"
+
+
+def get_sector_outlook(sector_trend_df):
+    """
+    Sends the full-universe sector week/month trend snapshot (see
+    strategy.generate_shortlist) plus recent index-level news
+    (config.MARKET_NEWS_TICKERS) to the LLM and returns a short markdown
+    call-out of which sectors are falling out of favor vs. building
+    strength. The market-wide counterpart to get_ai_recommendations (which
+    writes per-stock trade plans) - same graceful-degradation behavior on a
+    missing key or API failure.
+    """
+    if sector_trend_df is None or sector_trend_df.empty:
+        return "No sector data available for this scan."
+
+    if not config.LLM_API_KEY or config.LLM_API_KEY == "your_llm_api_key_here":
+        return "AI sector outlook skipped: LLM_API_KEY is not configured (see the Shortlist tab's AI commentary note for setup steps)."
+
+    trend_text = _format_sector_trends(sector_trend_df)
+    news_text = _format_market_news()
+
+    prompt = (
+        "You are reviewing sector-level performance for the Indian stock market "
+        "(NSE), averaged across every scanned stock in each sector - not just a "
+        "shortlist of top picks. Each line below shows a sector's average return "
+        f"over the last {config.SECTOR_TREND_WEEK_DAYS} trading sessions (1W) and "
+        f"the last {config.SECTOR_TREND_MONTH_DAYS} trading sessions (1M).\n\n"
+        f"Sector trend snapshot:\n{trend_text}\n\n"
+        f"Recent index-level news headlines (Nifty 50 / Sensex):\n{news_text}\n\n"
+        "Write a concise markdown summary (short bullet points, NOT long "
+        "paragraphs) with exactly three sections:\n"
+        "- **Falling out of favor**: 2-4 sectors with weak/negative trend, each "
+        "with a one-line reason grounded in the trend numbers and/or news above.\n"
+        "- **Building strength**: 2-4 sectors with improving or strong momentum "
+        "that look best-placed to rise from here, each with a one-line reason.\n"
+        "- **Watch**: 1-2 sentences on the specific upcoming trigger (from the "
+        "news above, if any is mentioned) that could change this picture.\n"
+        "Ground every claim strictly in the trend numbers and headlines given - "
+        "do not invent data points, earnings figures, or events not present above."
+    )
+
+    try:
+        return _call_llm(prompt, MARKET_STRATEGIST_SYSTEM_PROMPT)
+    except (requests.exceptions.RequestException, KeyError, IndexError, ValueError) as e:
+        return _llm_error_message(e)

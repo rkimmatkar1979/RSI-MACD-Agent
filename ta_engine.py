@@ -494,6 +494,8 @@ def analyze_ticker(ticker):
         latest_volume, avg_volume_20, volume_ratio = calculate_volume_metrics(df)
         buy_pct, sell_pct = calculate_buy_sell_pressure(df)
         return_nd = calculate_return(df)
+        return_week = calculate_return(df, window=config.SECTOR_TREND_WEEK_DAYS)
+        return_month = calculate_return(df, window=config.SECTOR_TREND_MONTH_DAYS)
         prev_session_date, prev_session_open, prev_session_close = get_reference_session(df)
 
         return {
@@ -526,6 +528,8 @@ def analyze_ticker(ticker):
             "buy_pct": buy_pct,
             "sell_pct": sell_pct,
             "return_nd": return_nd,
+            "return_week": return_week,
+            "return_month": return_month,
             "prev_session_date": prev_session_date,
             "prev_session_open": prev_session_open,
             "prev_session_close": prev_session_close,

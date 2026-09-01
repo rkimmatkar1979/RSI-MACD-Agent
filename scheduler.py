@@ -15,7 +15,7 @@ session.
 
 import config
 import db_handler
-from ai_analyst import get_ai_recommendations
+from ai_analyst import get_ai_recommendations, get_sector_outlook
 from ml.paper_trade import run_in_background as run_ml_paper_trade_in_background
 from strategy import generate_shortlist
 from ta_engine import is_market_open  # re-exported for callers (e.g. app.py)
@@ -23,7 +23,8 @@ from ta_engine import is_market_open  # re-exported for callers (e.g. app.py)
 
 def run_pipeline(tickers=None, progress_callback=None):
     """
-    Executes the full pipeline once: scan -> score -> AI commentary -> persist.
+    Executes the full pipeline once: scan -> score -> AI commentary
+    (per-stock + sector-wide) -> persist.
 
     Returns (shortlist_df, ai_commentary, scan_date).
     """
@@ -32,9 +33,13 @@ def run_pipeline(tickers=None, progress_callback=None):
     if tickers is None:
         tickers = config.SCAN_UNIVERSE
 
-    shortlist = generate_shortlist(tickers=tickers, progress_callback=progress_callback)
+    shortlist, sector_trend_df = generate_shortlist(tickers=tickers, progress_callback=progress_callback)
     ai_commentary = get_ai_recommendations(shortlist)
-    scan_date = db_handler.save_scan_results(shortlist, ai_commentary, universe_size=len(tickers))
+    sector_outlook = get_sector_outlook(sector_trend_df)
+    scan_date = db_handler.save_scan_results(
+        shortlist, ai_commentary, universe_size=len(tickers),
+        sector_trend_df=sector_trend_df, sector_outlook=sector_outlook,
+    )
 
     # Fire-and-forget: logs/resolves the experimental ML model's paper-trade
     # picks on a background thread, riding this same manual trigger instead

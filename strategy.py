@@ -320,18 +320,27 @@ def score_setup(analysis, sector_trend_pct):
     return score, reasons
 
 
+SECTOR_TREND_COLUMNS = ["sector", "trend_week_pct", "trend_month_pct"]
+
+
 def generate_shortlist(tickers=None, progress_callback=None):
     """
     Scans `tickers` (defaults to config.SCAN_UNIVERSE, i.e. the Nifty 100
-    plus Gold/Silver), scores every one, and returns a DataFrame sorted by
-    score (highest first).
+    plus Gold/Silver), scores every one, and returns
+    (shortlist_df, sector_trend_df).
 
-    The shortlist is the top SHORTLIST_MAX_SIZE Nifty 100 stocks by score,
-    PLUS Gold (TATAGOLD.NS) and Silver (TATASILV.NS), which are always
-    included regardless of score. Setups scoring below SHORTLIST_MIN_SCORE
-    that are only included to fill out the stock portion of the list get an
-    extra "weaker/exploratory setup" note; Gold/Silver get a "tracked
+    shortlist_df is sorted by score (highest first). It's the top
+    SHORTLIST_MAX_SIZE Nifty 100 stocks by score, PLUS Gold (TATAGOLD.NS)
+    and Silver (TATASILV.NS), which are always included regardless of
+    score. Setups scoring below SHORTLIST_MIN_SCORE that are only included
+    to fill out the stock portion of the list get an extra
+    "weaker/exploratory setup" note; Gold/Silver get a "tracked
     permanently" note instead.
+
+    sector_trend_df (columns: SECTOR_TREND_COLUMNS) has one row per sector
+    present anywhere in `tickers` - not just the shortlist - with its
+    average week/month return, for the informational sector-trend panel
+    above the Shortlist tab's heatmap (see app.py).
 
     Tickers are fetched/analyzed concurrently (config.SCAN_MAX_WORKERS
     threads) since each `analyze_ticker` call is dominated by a network
@@ -370,7 +379,7 @@ def generate_shortlist(tickers=None, progress_callback=None):
                 progress_callback(completed, total, ticker)
 
     if not results:
-        return pd.DataFrame(columns=SHORTLIST_COLUMNS)
+        return pd.DataFrame(columns=SHORTLIST_COLUMNS), pd.DataFrame(columns=SECTOR_TREND_COLUMNS)
 
     # --- Sector trend: average each sector's recent return across every
     # successfully-analyzed ticker in that sector (small/secondary signal,
@@ -379,6 +388,25 @@ def generate_shortlist(tickers=None, progress_callback=None):
     for r in results:
         sector_returns.setdefault(r["sector"], []).append(r["return_nd"])
     sector_trend = {sector: sum(vals) / len(vals) for sector, vals in sector_returns.items()}
+
+    # --- Sector trend snapshot (week/month) - purely informational, not fed
+    # into scoring (see SECTOR_TREND_WEEK_DAYS/MONTH_DAYS in config.py).
+    # Averaged across every sector in `results` (the FULL scanned universe),
+    # unlike the heatmap in app.py which only shows sectors present in that
+    # day's shortlist - so a sector with zero qualifying setups still shows
+    # up here. -----------------------------------------------------------
+    sector_week_returns, sector_month_returns = {}, {}
+    for r in results:
+        sector_week_returns.setdefault(r["sector"], []).append(r["return_week"])
+        sector_month_returns.setdefault(r["sector"], []).append(r["return_month"])
+    sector_trend_df = pd.DataFrame([
+        {
+            "sector": sector,
+            "trend_week_pct": sum(sector_week_returns[sector]) / len(sector_week_returns[sector]),
+            "trend_month_pct": sum(sector_month_returns[sector]) / len(sector_month_returns[sector]),
+        }
+        for sector in sector_returns
+    ]).sort_values("trend_week_pct", ascending=False).reset_index(drop=True)
 
     for r in results:
         sector_trend_pct = sector_trend[r["sector"]]
@@ -412,4 +440,4 @@ def generate_shortlist(tickers=None, progress_callback=None):
                 "weaker or exploratory setup."
             ]
 
-    return shortlist_df[SHORTLIST_COLUMNS]
+    return shortlist_df[SHORTLIST_COLUMNS], sector_trend_df

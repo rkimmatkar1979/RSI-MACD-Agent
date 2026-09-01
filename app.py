@@ -371,6 +371,8 @@ if st.session_state.get("scan_in_progress"):
         db_handler.get_scan_by_date.clear()
         db_handler.get_scan_timestamps.clear()
         db_handler.get_score_history.clear()
+        db_handler.get_sector_trends.clear()
+        db_handler.get_sector_outlook.clear()
         st.session_state.pop("date_select", None)
         db_handler.log_event(
             st.session_state.get("_user_email", ""),
@@ -408,7 +410,7 @@ if st.session_state.get("custom_analysis_in_progress"):
         progress_bar.progress(i / total, text=f"Analyzing {ticker} ({i}/{total})")
 
     try:
-        custom_df = generate_shortlist(tickers=custom_tickers, progress_callback=_custom_progress_cb)
+        custom_df, _ = generate_shortlist(tickers=custom_tickers, progress_callback=_custom_progress_cb)
         progress_bar.progress(1.0, text="Fetching news and generating AI commentary...")
         with st.spinner("Fetching news and generating AI commentary - this can take a minute..."):
             custom_commentary = get_ai_recommendations(custom_df)
@@ -793,6 +795,17 @@ def _load_forward_validation_report(model_path):
     except Exception as e:
         print(f"[app] forward validation report failed: {e}")
         return None
+
+
+@st.cache_data(ttl=config.PRICE_DATA_CACHE_TTL, show_spinner=False)
+def _load_model_comparison():
+    """Cached wrapper around ml.forward_validation.compare_models - every model's live paper-trading summary side by side, not scoped to whichever model is selected in the dropdown."""
+    from ml.forward_validation import compare_models
+    try:
+        return compare_models(db_handler.get_all_ml_predictions())
+    except Exception as e:
+        print(f"[app] model comparison failed: {e}")
+        return {}
 
 
 @st.cache_data(ttl=config.PRICE_DATA_CACHE_TTL, show_spinner="Scoring ML confidence...")
@@ -1224,6 +1237,53 @@ stock's own signals.
     if signals_df.empty:
         st.info("No stocks met the scoring threshold on this date.")
     else:
+        # --- Sector outlook: last week vs. last month, full scan universe ---
+        # Unlike the heatmap below (shortlist-only, 10D), this covers every
+        # sector that was scanned that day, so a sector with zero qualifying
+        # setups still shows up - see strategy.generate_shortlist's
+        # sector_trend_df and db_handler.get_sector_trends/get_sector_outlook.
+        st.markdown("**Sector outlook — last week vs. last month**")
+        full_sector_trend_df = db_handler.get_sector_trends(scan_date)
+        if full_sector_trend_df.empty:
+            st.caption(
+                "No sector trend history for this date (this panel was added "
+                "after this scan was recorded - re-run a scan to populate it)."
+            )
+        else:
+            trend_bar_df = full_sector_trend_df.sort_values("trend_week_pct", ascending=True)
+            trend_bar_fig = go.Figure()
+            trend_bar_fig.add_trace(go.Bar(
+                y=trend_bar_df["sector"], x=(trend_bar_df["trend_week_pct"] * 100).round(2),
+                name=f"Last {config.SECTOR_TREND_WEEK_DAYS} sessions (~1W)",
+                orientation="h", marker_color="#4C78A8",
+            ))
+            trend_bar_fig.add_trace(go.Bar(
+                y=trend_bar_df["sector"], x=(trend_bar_df["trend_month_pct"] * 100).round(2),
+                name=f"Last {config.SECTOR_TREND_MONTH_DAYS} sessions (~1M)",
+                orientation="h", marker_color="#B0B8C1",
+            ))
+            trend_bar_fig.update_layout(
+                barmode="group",
+                height=max(220, 32 * len(trend_bar_df)),
+                margin=dict(l=10, r=10, t=10, b=10),
+                xaxis_title="Return %",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                paper_bgcolor=PLOTLY_PAPER_BG,
+                plot_bgcolor=PLOTLY_PLOT_BG,
+                font_color=PLOTLY_FONT_COLOR,
+            )
+            trend_bar_fig.update_xaxes(gridcolor=PLOTLY_GRID_COLOR, zerolinecolor=PLOTLY_ZERO_COLOR)
+            st.plotly_chart(trend_bar_fig, use_container_width=True)
+
+            sector_outlook_text = db_handler.get_sector_outlook(scan_date)
+            if sector_outlook_text:
+                with st.expander("🔮 AI sector-rotation call (which sectors look set to rise/fall)", expanded=False):
+                    st.caption(
+                        "Generated once per scan from the trend numbers above plus "
+                        "recent Nifty/Sensex headlines - a directional read, not a guarantee."
+                    )
+                    st.markdown(sector_outlook_text)
+
         # --- Sector trend heatmap -------------------------------------------
         # One cell per sector represented in this shortlist (not the full
         # scan universe) - a quick read on which sectors are rotating in/out
@@ -1777,6 +1837,18 @@ if can_use_admin_tools and ML_PREDICTIONS_TAB_ENABLED:
                         f2.metric("Live win rate", f"{_s['win_rate']:.0%}")
                         f3.metric("Breakeven win rate", f"{_s['breakeven_win_rate']:.0%}")
                         f4.metric("Live EV / trade", f"{_s['ev_pct']:+.2%}")
+
+                        def _fmt_pct_pair(stats):
+                            return "—" if stats["mean"] is None else f"{stats['mean']:+.2%} (median {stats['median']:+.2%})"
+
+                        g1, g2, g3, g4 = st.columns(4)
+                        g1.metric("Avg realized return", _fmt_pct_pair(_s["realized_return"]))
+                        g2.metric("Avg MFE", _fmt_pct_pair(_s["mfe_pct"]), help="Max favorable excursion — the best excess return reached before resolution, win or lose.")
+                        g3.metric("Avg MAE", _fmt_pct_pair(_s["mae_pct"]), help="Max adverse excursion — the worst excess return reached before resolution, win or lose.")
+                        g4.metric(
+                            "Avg holding period",
+                            "—" if _s["days_held"]["mean"] is None else f"{_s['days_held']['mean']:.1f}d (median {_s['days_held']['median']:.0f}d)",
+                        )
                         if _fv_report["calibration_error"] is not None:
                             st.caption(f"Live calibration error (ECE): {_fv_report['calibration_error']:.3f}")
 
@@ -1813,6 +1885,33 @@ if can_use_admin_tools and ML_PREDICTIONS_TAB_ENABLED:
                                 "By market regime (India VIX, relative to this log's own history)",
                                 None, _fv_report["by_market_regime"],
                             )
+
+                st.markdown("---")
+                st.markdown("### ⚖️ Model comparison — every model's live results side by side")
+                st.caption("Pooled across all logged models, independent of the model-run selector above.")
+
+                _comparison = _load_model_comparison() if active_tab == TAB_ML else {}
+                if not _comparison:
+                    st.info("No paper-trading log yet.")
+                else:
+                    _comp_rows = []
+                    for _name, _cs in _comparison.items():
+                        _comp_rows.append({
+                            "model": _name,
+                            "resolved": _cs["resolved_n"],
+                            "pending": _cs["pending_n"],
+                            "win_rate": _cs["win_rate"],
+                            "breakeven": _cs["breakeven_win_rate"],
+                            "ev_pct": _cs["ev_pct"],
+                            "avg_realized_return": _cs["realized_return"]["mean"],
+                            "avg_days_held": _cs["days_held"]["mean"],
+                        })
+                    st.dataframe(pd.DataFrame(_comp_rows), use_container_width=True, hide_index=True)
+                    if any(c["resolved"] < 20 for c in _comparison.values()):  # matches ml.forward_validation.MIN_REPORT_N
+                        st.caption(
+                            "One or more models still have a small resolved sample — treat any gap between "
+                            "models as noise until each has accumulated more resolved predictions."
+                        )
 
 # ---------------------------------------------------------------------------
 # Tab 5: Admin - manage who can access this app (admins only)

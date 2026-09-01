@@ -17,8 +17,8 @@ not quietly pretend otherwise.
 """
 
 import json
+import os
 
-import numpy as np
 import pandas as pd
 
 MIN_BUCKET_N = 5
@@ -54,6 +54,14 @@ def _bucketed_table(df, col, q, labels, min_n=MIN_BUCKET_N):
     return rows
 
 
+def _mean_median(series):
+    """Mean/median of a numeric column, ignoring NaNs - None (not NaN) if nothing's there, so this is JSON/Streamlit-safe without a separate isna check at every call site."""
+    valid = series.dropna()
+    if valid.empty:
+        return {"mean": None, "median": None}
+    return {"mean": float(valid.mean()), "median": float(valid.median())}
+
+
 def overall_summary(df):
     resolved = df[df["resolved"] == 1]
     pending_n = int((df["resolved"] == 0).sum())
@@ -72,6 +80,10 @@ def overall_summary(df):
         "above_breakeven": (
             stats["win_rate"] >= breakeven if stats["win_rate"] is not None and breakeven is not None else None
         ),
+        "realized_return": _mean_median(resolved["realized_return"]) if "realized_return" in resolved else {"mean": None, "median": None},
+        "mfe_pct": _mean_median(resolved["mfe_pct"]) if "mfe_pct" in resolved else {"mean": None, "median": None},
+        "mae_pct": _mean_median(resolved["mae_pct"]) if "mae_pct" in resolved else {"mean": None, "median": None},
+        "days_held": _mean_median(resolved["days_held"]) if "days_held" in resolved else {"mean": None, "median": None},
     }
 
 
@@ -162,6 +174,23 @@ def by_market_regime(resolved, min_n=MIN_BUCKET_N):
     if len(valid) < max(min_n, 3):
         return None
     return _bucketed_table(valid, "_india_vix", q=3, labels=["low VIX", "mid VIX", "high VIX"], min_n=min_n)
+
+
+def compare_models(df_all):
+    """
+    df_all: db_handler.get_all_ml_predictions() with NO model_path filter
+    (every model pooled together). Returns one overall_summary() per
+    distinct model_path found, keyed by that path's basename (so "v7 vs v8"
+    reads cleanly) - lets the dashboard show them side by side instead of
+    flipping the model-run dropdown back and forth.
+    """
+    if df_all.empty or "model_path" not in df_all.columns:
+        return {}
+    result = {}
+    for model_path, group in df_all.groupby("model_path"):
+        name = os.path.basename(str(model_path)).replace(".joblib", "")
+        result[name] = overall_summary(group)
+    return result
 
 
 def build_report(df, min_report_n=MIN_REPORT_N):

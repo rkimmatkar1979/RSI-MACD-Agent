@@ -77,8 +77,22 @@ SHORTLIST_COLUMNS = [
     "fib_high", "fib_low", "week52_high", "week52_low", "pct_from_52w_high",
     "macd_pattern", "volume_ratio", "avg_volume_20", "buy_pct", "sell_pct",
     "sector_trend_pct", "prev_session_date", "prev_session_open", "prev_session_close",
-    "score", "reasons",
+    "score", "reasons", "score_breakdown",
 ]
+
+
+def _format_shares(n):
+    """
+    Indian-style share-count formatting - Lakh (1,00,000) / Crore
+    (1,00,00,000) notation instead of Western comma grouping, since this is
+    an NSE-focused tool and volume figures read more naturally that way to
+    Indian markets users (e.g. "12.3L" rather than "1,230,000").
+    """
+    if n >= 1e7:
+        return f"{n / 1e7:.2f}Cr"
+    if n >= 1e5:
+        return f"{n / 1e5:.2f}L"
+    return f"{n:,.0f}"
 
 
 def score_setup(analysis, sector_trend_pct):
@@ -86,10 +100,14 @@ def score_setup(analysis, sector_trend_pct):
     Computes a composite score (max 100) for a single ticker's analysis dict.
     See the module docstring for the full score formula.
 
-    Returns (score, reasons) where reasons is a list of human-readable,
-    swing-trading-oriented explanations. Reasons always include baseline
+    Returns (score, reasons, breakdown). reasons is a list of human-readable,
+    swing-trading-oriented explanations, always including baseline
     52-week-high, MACD-trend, and sector-trend context, plus an entry for
-    each scoring condition that fired.
+    each scoring condition that fired. breakdown is {"fib", "rsi", "macd",
+    "swing", "sector": <points awarded, same values already summed into
+    score>} - purely a readout for the UI's score-breakdown display (see
+    app.py), computed alongside score rather than changing how it's
+    computed.
 
     `sector_trend_pct` is this ticker's sector's average return over
     config.SECTOR_TREND_LOOKBACK_DAYS, computed across the whole scan in
@@ -98,6 +116,10 @@ def score_setup(analysis, sector_trend_pct):
     score = 0
     reasons = []
     bias = "neutral"  # set to "bullish"/"bearish" by RSI/MACD below
+    fib_score = 0
+    rsi_score = 0
+    macd_score = 0
+    sector_score = 0
 
     # --- Fibonacci proximity (max 30) -------------------------------------
     if analysis["fib_distance_pct"] <= config.FIB_PROXIMITY_PCT:
@@ -106,7 +128,8 @@ def score_setup(analysis, sector_trend_pct):
         is_key_level = any(abs(level_pct - k) < 1e-6 for k in config.FIB_KEY_LEVELS)
 
         if is_key_level:
-            score += config.SCORE_FIB_KEY_LEVEL
+            fib_score = config.SCORE_FIB_KEY_LEVEL
+            score += fib_score
             reasons.append(
                 f"Price ({analysis['close']:.2f}) is within "
                 f"{analysis['fib_distance_pct'] * 100:.2f}% of the key {level_name} "
@@ -116,7 +139,8 @@ def score_setup(analysis, sector_trend_pct):
                 "higher-probability reaction zone for a 3-month swing entry or exit."
             )
         else:
-            score += config.SCORE_FIB_OTHER_LEVEL
+            fib_score = config.SCORE_FIB_OTHER_LEVEL
+            score += fib_score
             reasons.append(
                 f"Price ({analysis['close']:.2f}) is within "
                 f"{analysis['fib_distance_pct'] * 100:.2f}% of the {level_name} "
@@ -210,7 +234,8 @@ def score_setup(analysis, sector_trend_pct):
             f"{when}, an actual reversal rather than an anticipated one{extension_note}"
         )
     elif analysis["macd_hist"] < 0 and analysis["macd_hist_rising_5d"]:
-        score += config.SCORE_MACD_EARLY
+        macd_score = config.SCORE_MACD_EARLY
+        score += macd_score
         if bias == "neutral":
             bias = "bullish"
         reasons.append(
@@ -268,7 +293,7 @@ def score_setup(analysis, sector_trend_pct):
     if volume_ratio >= config.VOLUME_SURGE_RATIO:
         reasons.append(
             f"Volume is running at {volume_ratio:.2f}x its "
-            f"{config.VOLUME_AVG_WINDOW}-day average ({analysis['avg_volume_20']:,.0f} "
+            f"{config.VOLUME_AVG_WINDOW}-day average ({_format_shares(analysis['avg_volume_20'])} "
             "shares) - above-average participation, though volume alone doesn't "
             "score a setup."
         )
@@ -282,7 +307,8 @@ def score_setup(analysis, sector_trend_pct):
     sector = analysis["sector"]
     lookback = config.SECTOR_TREND_LOOKBACK_DAYS
     if bias == "bullish" and sector_trend_pct >= config.SECTOR_TREND_THRESHOLD:
-        score += config.SCORE_SECTOR_TREND
+        sector_score = config.SCORE_SECTOR_TREND
+        score += sector_score
         reasons.append(
             f"The {sector} sector is up {sector_trend_pct * 100:.1f}% over the last "
             f"{lookback} sessions, a tailwind that supports this stock's bullish setup."
@@ -317,7 +343,14 @@ def score_setup(analysis, sector_trend_pct):
         macd_summary += "."
     reasons.append(macd_summary)
 
-    return score, reasons
+    breakdown = {
+        "fib": round(fib_score, 2),
+        "rsi": round(rsi_score, 2),
+        "macd": round(macd_score, 2),
+        "swing": round(swing_score, 2),
+        "sector": round(sector_score, 2),
+    }
+    return score, reasons, breakdown
 
 
 SECTOR_TREND_COLUMNS = ["sector", "trend_week_pct", "trend_month_pct"]
@@ -435,10 +468,11 @@ def generate_shortlist(tickers=None, progress_callback=None):
 
     for r in results:
         sector_trend_pct = sector_trend[r["sector"]]
-        score, reasons = score_setup(r, sector_trend_pct)
+        score, reasons, breakdown = score_setup(r, sector_trend_pct)
         r["sector_trend_pct"] = sector_trend_pct
         r["score"] = score
         r["reasons"] = reasons
+        r["score_breakdown"] = breakdown
 
     df = pd.DataFrame(results)
 

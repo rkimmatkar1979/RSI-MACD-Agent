@@ -185,6 +185,7 @@ def init_db():
                     prev_session_close REAL,
                     score INTEGER,
                     reasons TEXT,
+                    score_breakdown TEXT,
                     FOREIGN KEY (scan_date) REFERENCES scans(scan_date)
                 )
             """)
@@ -223,6 +224,18 @@ def init_db():
                     name TEXT,
                     first_login TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'active'
+                )
+            """)
+            # Pinned/starred tickers, kept at the top of the Shortlist table
+            # regardless of score. Keyed by user_email - the empty string
+            # when AUTH_ENABLED is off (see app.py's user_email resolution),
+            # so a single-user/no-auth deployment gets one shared watchlist.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS watchlist (
+                    user_email TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    added_at TEXT NOT NULL,
+                    PRIMARY KEY (user_email, ticker)
                 )
             """)
             conn.execute("""
@@ -323,6 +336,7 @@ def init_db():
                 ("prev_session_date", "TEXT"),
                 ("prev_session_open", "REAL"),
                 ("prev_session_close", "REAL"),
+                ("score_breakdown", "TEXT"),
             ):
                 if col not in existing_cols:
                     conn.execute(f"ALTER TABLE signals ADD COLUMN {col} {col_type}")
@@ -431,8 +445,8 @@ def save_scan_results(shortlist_df, ai_commentary, universe_size, sector_trend_d
                 fib_distance_pct, fib_high, fib_low, week52_high, week52_low,
                 pct_from_52w_high, macd_pattern, volume_ratio, avg_volume_20,
                 buy_pct, sell_pct, sector_trend_pct, prev_session_date,
-                prev_session_open, prev_session_close, score, reasons
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                prev_session_open, prev_session_close, score, reasons, score_breakdown
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 scan_date,
@@ -463,6 +477,7 @@ def save_scan_results(shortlist_df, ai_commentary, universe_size, sector_trend_d
                 float(row["prev_session_close"]),
                 int(row["score"]),
                 json.dumps(row["reasons"]),
+                json.dumps(row["score_breakdown"]),
             ),
         ))
 
@@ -548,6 +563,10 @@ def _rows_to_signals_df(signal_rows):
             rec["reasons"] = json.loads(rec["reasons"]) if rec["reasons"] else []
         except (TypeError, json.JSONDecodeError):
             rec["reasons"] = []
+        try:
+            rec["score_breakdown"] = json.loads(rec["score_breakdown"]) if rec.get("score_breakdown") else {}
+        except (TypeError, json.JSONDecodeError):
+            rec["score_breakdown"] = {}
         # Stored as close_price in SQLite; rename to match strategy.py's "close"
         # so callers can treat live and DB-loaded shortlists identically.
         rec["close"] = rec.pop("close_price")
@@ -789,6 +808,49 @@ def restore_user(email):
         get_all_authorized_users.clear()
     except _DB_ERRORS as e:
         print(f"[db_handler] Failed to restore user {email}: {e}")
+        raise
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_watchlist(user_email):
+    """Returns the set of tickers this user has pinned, most-recently-added last."""
+    try:
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT ticker FROM watchlist WHERE user_email = ? ORDER BY added_at ASC",
+                (user_email,),
+            ).fetchall()
+        return [r["ticker"] for r in rows]
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to fetch watchlist for {user_email}: {e}")
+        return []
+
+
+def add_to_watchlist(user_email, ticker):
+    """Pins a ticker for this user. Safe to call if already pinned (no-op)."""
+    try:
+        with get_connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO watchlist (user_email, ticker, added_at) VALUES (?, ?, ?)",
+                (user_email, ticker, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            )
+        get_watchlist.clear()
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to add {ticker} to watchlist for {user_email}: {e}")
+        raise
+
+
+def remove_from_watchlist(user_email, ticker):
+    """Unpins a ticker for this user. Safe to call if not pinned (no-op)."""
+    try:
+        with get_connection() as conn:
+            conn.execute(
+                "DELETE FROM watchlist WHERE user_email = ? AND ticker = ?",
+                (user_email, ticker),
+            )
+        get_watchlist.clear()
+    except _DB_ERRORS as e:
+        print(f"[db_handler] Failed to remove {ticker} from watchlist for {user_email}: {e}")
         raise
 
 

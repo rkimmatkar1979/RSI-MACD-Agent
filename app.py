@@ -9,6 +9,7 @@ import html
 import io
 import os
 import re
+import time
 
 import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -22,7 +23,7 @@ import db_handler
 import fundamentals
 from ai_analyst import get_ai_recommendations
 from ml.train import load_diagnostics
-from scheduler import is_market_open, maybe_auto_scan, run_pipeline
+from scheduler import is_market_open, run_pipeline, should_auto_scan
 from strategy import compute_market_regime, generate_shortlist
 from ta_engine import (
     calculate_buy_sell_pressure,
@@ -33,6 +34,17 @@ from ta_engine import (
     get_reference_session,
     nearest_fib_level,
 )
+
+def _progress_text(verb, i, total, ticker, start_time):
+    """'<Verb> TICKER (i/total) — Ns elapsed, ~Ms remaining', for a progress
+    bar's text= - ETA is a simple average-rate projection from elapsed time,
+    not tracked per-ticker (scan time is dominated by network latency,
+    which varies too much ticker-to-ticker for a fancier estimate to be
+    worth it)."""
+    elapsed = time.time() - start_time
+    remaining = (elapsed / i) * (total - i) if i else 0
+    return f"{verb} {ticker} ({i}/{total}) — {elapsed:.0f}s elapsed, ~{remaining:.0f}s remaining"
+
 
 # Shared style objects (not re-created per cell - see _write_excel_sheet)
 # for the app's black-cell/white-text Excel export look.
@@ -396,6 +408,16 @@ st.session_state["_user_email"] = user_email
 # it automatically locks down to AUTH_ADMIN_EMAILS only.
 can_use_admin_tools = is_admin or not config.AUTH_ENABLED
 
+# "No scheduling infra" workaround - whoever loads the app first each
+# trading day with no scan yet recorded triggers that day's scan right on
+# screen (the same full-page progress view as clicking "Run Full Scan Now"
+# below), not silently in the background - see scheduler.should_auto_scan.
+if should_auto_scan():
+    st.session_state["_pending_active_tab"] = st.session_state.get("active_tab")
+    st.session_state["scan_in_progress"] = True
+    st.session_state["_auto_triggered_scan"] = True
+    st.rerun()
+
 # ---------------------------------------------------------------------------
 # Run a fresh scan on demand - rendered as its own minimal page (just a
 # progress bar, no sidebar/tabs/other widgets) so nothing else on screen can
@@ -404,14 +426,22 @@ can_use_admin_tools = is_admin or not config.AUTH_ENABLED
 # ---------------------------------------------------------------------------
 if st.session_state.get("scan_in_progress"):
     st.subheader("🔄 Scanning Nifty 100...")
-    st.caption(
-        "Running full scan and requesting AI commentary — this takes a minute or two. "
-        "The page will refresh automatically when done."
-    )
+    if st.session_state.pop("_auto_triggered_scan", False):
+        st.caption(
+            "No scan has run yet today, so this started automatically. "
+            "Requesting AI commentary too — this takes a minute or two. "
+            "The page will refresh automatically when done."
+        )
+    else:
+        st.caption(
+            "Running full scan and requesting AI commentary — this takes a minute or two. "
+            "The page will refresh automatically when done."
+        )
     progress_bar = st.progress(0.0, text="Starting scan...")
+    _scan_start_time = time.time()
 
     def _progress_cb(i, total, ticker):
-        progress_bar.progress(i / total, text=f"Scanning {ticker} ({i}/{total})")
+        progress_bar.progress(i / total, text=_progress_text("Scanning", i, total, ticker, _scan_start_time))
 
     try:
         shortlist, ai_commentary, scan_date = run_pipeline(progress_callback=_progress_cb)
@@ -457,9 +487,10 @@ if st.session_state.get("custom_analysis_in_progress"):
         "The page will refresh automatically when done."
     )
     progress_bar = st.progress(0.0, text="Starting analysis...")
+    _custom_start_time = time.time()
 
     def _custom_progress_cb(i, total, ticker):
-        progress_bar.progress(i / total, text=f"Analyzing {ticker} ({i}/{total})")
+        progress_bar.progress(i / total, text=_progress_text("Analyzing", i, total, ticker, _custom_start_time))
 
     try:
         custom_df, _ = generate_shortlist(tickers=custom_tickers, progress_callback=_custom_progress_cb)
@@ -494,17 +525,6 @@ if "scan_message" in st.session_state:
 latest = db_handler.get_latest_scan()
 available_dates = db_handler.get_available_scan_dates()
 scan_timestamps = db_handler.get_scan_timestamps()
-
-# "No scheduling infra" workaround - whoever loads the app first each
-# trading day with no scan yet recorded kicks off that day's scan in the
-# background (see scheduler.maybe_auto_scan). Non-blocking: this page load
-# still renders normally below with whatever's already in `latest`/`available_dates`.
-if maybe_auto_scan():
-    st.toast(
-        "🔄 Today's scan just started in the background — check back in a "
-        "few minutes for fresh results.",
-        icon="🔄",
-    )
 
 # ---------------------------------------------------------------------------
 # Sidebar - controls
@@ -631,6 +651,13 @@ if not _context_sector_trends.empty:
     _bottom_sector_row = _context_sector_trends.loc[_context_sector_trends["trend_week_pct"].idxmin()]
     _last_sync = scan_timestamps.get(latest_scan_date, latest_scan_date)
 
+    # NOTE: this was previously `position: sticky` so it stayed visible
+    # while scrolling, but that fought Streamlit's rerun-on-every-interaction
+    # model - every click (row select, checkbox, filter) redraws the whole
+    # page, and re-applying sticky positioning on each redraw is what caused
+    # the flickering/jank reported when switching stocks or toggling
+    # columns. Reverted to a normal (non-sticky) bar - smooth beats
+    # always-visible here.
     with st.container(border=True):
         cb1, cb2, cb3, cb4 = st.columns([1.2, 1.4, 1.4, 1.3])
         with cb1:
@@ -756,9 +783,10 @@ def _style_rsi(val):
 
 
 def _style_macd_diff(val):
-    """Color the MACD-Signal diff by sign: green = bullish, red = bearish."""
+    """Color the MACD-Signal diff by sign: green = bullish, red = bearish.
+    Format is "<glyph> <value> (<dir>)" - the numeric value is the 2nd token."""
     try:
-        diff = float(val.split(" ")[0])
+        diff = float(val.split(" ")[1])
     except (ValueError, IndexError):
         return ""
     if diff > 0:
@@ -779,6 +807,35 @@ def _style_pct_sign(val):
     if v < 0:
         return "background-color: #f8d7da; color: #721c24; font-weight: 600"
     return ""
+
+
+def _pct_sign_glyph(v):
+    """Formats a signed percentage with a ▲/▼ prefix redundant with
+    _style_pct_sign's color - readable without relying on color alone."""
+    glyph = "▲" if v > 0 else "▼" if v < 0 else "–"
+    return f"{glyph} {v:+.2f}%"
+
+
+# Short tag label + colored square per score component - same 5 components
+# and colors as the Score Breakdown chart above, so a stock's "Signals"
+# column reads consistently with that chart at a glance instead of the full
+# reasons sentences (still shown in full in the per-stock detail panel).
+_SIGNAL_TAGS = [
+    ("fib", "🔷 Fib"),
+    ("rsi", "🟠 RSI"),
+    ("macd", "🟢 MACD"),
+    ("swing", "🟣 Swing"),
+    ("sector", "🔴 Sector"),
+]
+
+
+def _signal_tags(score_breakdown):
+    """Compact tag string for whichever score components contributed
+    (> 0 points) for this stock, e.g. "🔷 Fib  🟢 MACD  🟣 Swing"."""
+    if not score_breakdown:
+        return "—"
+    tags = [label for key, label in _SIGNAL_TAGS if score_breakdown.get(key, 0) > 0]
+    return "  ".join(tags) if tags else "—"
 
 
 def _split_ai_commentary(text, tickers):
@@ -1329,7 +1386,10 @@ with tab_shortlist:
 
     if not signals_df.empty:
         _excel_shortlist_df = signals_df.assign(
-            reasons=signals_df["reasons"].apply(lambda r: "; ".join(r) if r else "-")
+            reasons=signals_df["reasons"].apply(lambda r: "; ".join(r) if r else "-"),
+            score_breakdown=signals_df["score_breakdown"].apply(
+                lambda b: ", ".join(f"{k}={v}" for k, v in b.items()) if b else "-"
+            ),
         )
         st.download_button(
             "📥 Download Consolidated Excel (Shortlist + Sector Data + AI Commentary)",
@@ -1372,6 +1432,53 @@ stock's own signals.
     if signals_df.empty:
         st.info("No stocks met the scoring threshold on this date.")
     else:
+        # --- Score breakdown: one stacked bar per stock, one segment per
+        # scoring component - "why is this score what it is" at a glance,
+        # without reading the static explanation table above. Uses the
+        # exact points score_setup() already awarded (score_breakdown, see
+        # strategy.py) - purely a readout, not a recomputation. Older scans
+        # saved before this existed have no score_breakdown data, so this
+        # section just doesn't render for them rather than showing zeros. --
+        _breakdown_df = pd.DataFrame([
+            {"Ticker": r["ticker"], **(r["score_breakdown"] or {})}
+            for _, r in signals_df.iterrows()
+        ])
+        _breakdown_cols = [c for c in ("fib", "rsi", "macd", "swing", "sector") if c in _breakdown_df.columns]
+        if _breakdown_cols and _breakdown_df[_breakdown_cols].fillna(0).to_numpy().any():
+            st.markdown("### 📊 Score Breakdown by Component")
+            _breakdown_df = _breakdown_df.merge(
+                signals_df[["ticker", "score"]].rename(columns={"ticker": "Ticker"}), on="Ticker"
+            ).sort_values("score")
+            breakdown_fig = go.Figure()
+            for col, label, color in (
+                ("fib", "Fibonacci", "#4C78A8"),
+                ("rsi", "RSI", "#F58518"),
+                ("macd", "MACD", "#54A24B"),
+                ("swing", "Swing Potential", "#B279A2"),
+                ("sector", "Sector Trend", "#E45756"),
+            ):
+                breakdown_fig.add_trace(go.Bar(
+                    y=_breakdown_df["Ticker"], x=_breakdown_df.get(col, 0),
+                    name=label, orientation="h", marker_color=color,
+                ))
+            breakdown_fig.update_layout(
+                barmode="stack",
+                height=max(220, 34 * len(_breakdown_df)),
+                margin=dict(l=10, r=10, t=10, b=10),
+                xaxis_title="Points",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                paper_bgcolor=PLOTLY_PAPER_BG,
+                plot_bgcolor=PLOTLY_PLOT_BG,
+                font_color=PLOTLY_FONT_COLOR,
+            )
+            breakdown_fig.update_xaxes(gridcolor=PLOTLY_GRID_COLOR, zerolinecolor=PLOTLY_ZERO_COLOR)
+            st.plotly_chart(breakdown_fig, use_container_width=True)
+            st.caption(
+                "Each bar is one stock's total score, split by how many points "
+                "each component contributed - see the expander above for what "
+                "each component measures."
+            )
+
         # --- Sector Intelligence: quant data and the AI narrative live in
         # separate tabs so switching to "Quantitative" hides the AI text
         # entirely for anyone who just wants the raw numbers, instead of
@@ -1413,7 +1520,7 @@ stock's own signals.
                         "border": f"1px solid {COLOR_TABLE_GRID}",
                     })
                     .map(_style_pct_sign, subset=[week_col, month_col])
-                    .format({week_col: "{:+.2f}%", month_col: "{:+.2f}%"})
+                    .format(_pct_sign_glyph, subset=[week_col, month_col])
                 )
                 st.dataframe(styled_trend_table, use_container_width=True, hide_index=True)
                 st.caption(
@@ -1440,7 +1547,9 @@ stock's own signals.
                 y=[""],
                 colorscale="RdYlGn",
                 zmid=0,
-                text=[[f"{v:+.2f}%" for v in sector_values]],
+                # ▲/▼ redundant with the red/green cell color - readable
+                # without relying on color alone (colorblind accessibility).
+                text=[[f"{'▲' if v > 0 else '▼' if v < 0 else '–'} {v:+.2f}%" for v in sector_values]],
                 texttemplate="%{text}",
                 hovertemplate="%{x}: %{z:+.2f}%<extra></extra>",
                 colorbar=dict(title="%", thickness=12, len=0.7),
@@ -1472,241 +1581,400 @@ stock's own signals.
             else:
                 st.caption("No AI sector-rotation call available for this date.")
 
-        # --- Day-over-day diff vs the previous retained scan ----------------
-        # SCAN_HISTORY_RETENTION_DAYS bounds how far back `available_dates`
-        # goes, so "previous" here means the next-older retained scan, not
-        # necessarily yesterday.
-        prev_scan_date = None
-        prev_signals_df = None
-        if scan_date in available_dates:
-            _scan_idx = available_dates.index(scan_date)
-            if _scan_idx + 1 < len(available_dates):
-                prev_scan_date = available_dates[_scan_idx + 1]
-                _prev_result = db_handler.get_scan_by_date(prev_scan_date)
-                if _prev_result is not None:
-                    _, _, prev_signals_df = _prev_result
-
-        if prev_signals_df is not None and not prev_signals_df.empty:
-            prev_scores = dict(zip(prev_signals_df["ticker"], prev_signals_df["score"]))
-        else:
-            prev_scores = None
-
-        def _score_delta_display(row):
-            if prev_scores is None:
-                return "—"
-            if row["ticker"] not in prev_scores:
-                return "🆕 New"
-            delta = int(row["score"]) - int(prev_scores[row["ticker"]])
-            if delta > 0:
-                return f"▲ +{delta}"
-            if delta < 0:
-                return f"▼ {delta}"
-            return "→ 0"
-
-        score_history = db_handler.get_score_history(
-            tuple(signals_df["ticker"].tolist()), scan_date
-        )
-
-        display_df = signals_df.copy()
-        display_df["score_delta_display"] = display_df.apply(_score_delta_display, axis=1)
-        def _fmt_score_trend(scores):
-            if not scores:
-                return "—"
-            recent = scores[-4:]
-            parts = " → ".join(str(int(s)) for s in recent)
-            if len(recent) >= 2:
-                if recent[-1] > recent[0]:
-                    return parts + " ▲"
-                if recent[-1] < recent[0]:
-                    return parts + " ▼"
-                return parts + " →"
-            return parts
-
-        display_df["score_trend"] = display_df["ticker"].map(
-            lambda t: _fmt_score_trend(score_history.get(t, []))
-        )
-        display_df["macd_hist_display"] = display_df.apply(
-            lambda r: f"{r['macd_hist']:.2f} ({r['macd_hist_direction']})", axis=1
-        )
-        display_df["buy_sell_display"] = display_df.apply(
-            lambda r: f"{r['buy_pct']:.0f}% / {r['sell_pct']:.0f}%", axis=1
-        )
-        display_df["sector_trend_display"] = (display_df["sector_trend_pct"] * 100).round(2)
-        display_df["signals_display"] = display_df["reasons"].apply(
-            lambda r: "; ".join(r) if r else "-"
-        )
-
-        display_df = display_df[[
-            "ticker", "sector", "close", "rsi", "macd_hist_display", "nearest_fib_level",
-            "nearest_fib_price", "fib_distance_pct", "week52_high",
-            "pct_from_52w_high", "volume_ratio", "buy_sell_display",
-            "sector_trend_display", "score_delta_display", "score_trend",
-            "signals_display",
-        ]].rename(columns={
-            "ticker": "Ticker",
-            "sector": "Sector",
-            "close": "Price",
-            "rsi": "RSI",
-            "macd_hist_display": "MACD-Signal Diff (dir)",
-            "nearest_fib_level": "Nearest Fib",
-            "nearest_fib_price": "Fib Price",
-            "fib_distance_pct": "Fib Dist %",
-            "week52_high": "52W High",
-            "pct_from_52w_high": "% From 52W High",
-            "volume_ratio": "Vol vs 20D Avg",
-            "buy_sell_display": "Buy % / Sell %",
-            "sector_trend_display": "Sector Trend % (10D)",
-            "score_delta_display": "Δ vs Prev",
-            "score_trend": "Score Trend",
-            "signals_display": "Signals",
-        })
-        display_df["Fib Dist %"] = (display_df["Fib Dist %"] * 100).round(2)
-        display_df["% From 52W High"] = (display_df["% From 52W High"] * 100).round(2)
-        display_df["Vol vs 20D Avg"] = display_df["Vol vs 20D Avg"].round(2)
-        display_df[["Price", "RSI", "Fib Price", "52W High"]] = (
-            display_df[["Price", "RSI", "Fib Price", "52W High"]].round(2)
-        )
-
-        # Compact view by default (better on mobile / narrow screens) - the
-        # remaining columns are still available via the checkbox below, and
-        # always shown in the per-row detail panel when a row is clicked.
-        compact_columns = [
-            "Ticker", "Sector", "Price", "RSI", "MACD-Signal Diff (dir)",
-            "Nearest Fib", "Fib Dist %", "Δ vs Prev", "Score Trend",
-        ]
-        _search = st.text_input(
-            "🔍 Filter by ticker", key="shortlist_search", placeholder="e.g. RELIANCE",
-            label_visibility="collapsed",
-        ).strip().upper()
-        if _search:
-            display_df = display_df[display_df["Ticker"].str.contains(_search, na=False)]
-
-        show_all_cols = st.checkbox(
-            "Show all columns (52W high, volume, buy/sell pressure, sector trend)",
-            value=False,
-        )
-        table_df = display_df if show_all_cols else display_df[compact_columns]
-
-        # With all columns shown, let the table keep its natural (wider)
-        # width and scroll horizontally instead of squeezing every column
-        # into the container.
-        table_width = "content" if show_all_cols else "stretch"
-        styled_table = (
-            table_df.style.set_properties(**{
-                "background-color": COLOR_TABLE_BG,
-                "color": COLOR_TABLE_TEXT,
-                "border": f"1px solid {COLOR_TABLE_GRID}",
-            })
-            .map(_style_rsi, subset=["RSI"])
-            .map(_style_macd_diff, subset=["MACD-Signal Diff (dir)"])
-        )
-        select_event = st.dataframe(
-            styled_table, width=table_width, hide_index=True,
-            on_select="rerun", selection_mode="single-row-required", key="shortlist_table",
-        )
-        with st.expander("ℹ️ Reading the table", expanded=False):
-            st.markdown(
-                f"**RSI** — 🟩 green when oversold (≤ {config.RSI_OVERSOLD}, possible bullish reversal), "
-                f"🟥 red when overbought (≥ {config.RSI_OVERBOUGHT}, possible bearish reversal).\n\n"
-                f"**Δ vs Prev** — score change vs the previous retained scan"
-                f"{f' ({prev_scan_date})' if prev_scan_date else ''}; 🆕 = new to the shortlist. "
-                f"**Score Trend** — scores across the last {config.SCAN_HISTORY_RETENTION_DAYS} retained scans (oldest → newest), with ▲/▼/→ showing the overall direction.\n\n"
-                "**MACD-Signal Diff (dir)** — positive = MACD above Signal line (bullish), negative = below (bearish). "
-                "**(up)**/**(down)** shows whether the histogram rose or fell vs the prior session.\n\n"
-                "**Fib Dist %** — how close price is to its nearest Fibonacci retracement level. "
-                "Click a row for the full breakdown including 52W high, volume, buy/sell pressure, and sector trend."
-            )
-            if show_all_cols:
-                st.markdown(
-                    f"**% From 52W High** — how far current price sits below the 52-week high (0% = at the high). "
-                    f"**Vol vs 20D Avg** — latest volume as a multiple of the {config.VOLUME_AVG_WINDOW}-day average "
-                    f"(≥ {config.VOLUME_SURGE_RATIO}x = surge). "
-                    f"**Buy % / Sell %** — volume-weighted proxy over the last {config.BUY_SELL_PRESSURE_WINDOW} sessions "
-                    "(not live order-book data). "
-                    "**Sector Trend % (10D)** — sector's average return over the last 10 sessions."
-                )
-
-        if prev_scores is not None:
-            dropped_tickers = set(prev_scores) - set(signals_df["ticker"])
-            if dropped_tickers:
-                dropped_list = ", ".join(
-                    f"{t} ({prev_scores[t]}/100)" for t in sorted(dropped_tickers)
-                )
-                st.caption(f"📉 Dropped from the shortlist since {prev_scan_date}: {dropped_list}")
-
-        selected_rows = select_event["selection"]["rows"] if select_event else []
-        if selected_rows:
-            sel_row = signals_df.iloc[selected_rows[0]]
-            st.markdown(f"**{sel_row['ticker']}** ({sel_row['sector']}) — score {sel_row['score']}/100")
-
-            d1, d2, d3, d4, d5 = st.columns(5)
-            with d1:
-                st.metric(
-                    "Nearest Fib",
-                    f"{sel_row['nearest_fib_level']} @ {sel_row['nearest_fib_price']:.2f}",
-                )
-            with d2:
-                st.metric(
-                    "52W High", f"₹{sel_row['week52_high']:.2f}",
-                    delta=f"-{sel_row['pct_from_52w_high'] * 100:.1f}%",
-                )
-            with d3:
-                st.metric("Vol vs 20D Avg", f"{sel_row['volume_ratio']:.2f}x")
-            with d4:
-                st.metric("Buy % / Sell %", f"{sel_row['buy_pct']:.0f}% / {sel_row['sell_pct']:.0f}%")
-            with d5:
-                st.metric(
-                    f"Sector Trend ({config.SECTOR_TREND_LOOKBACK_DAYS}D)",
-                    f"{sel_row['sector_trend_pct'] * 100:+.2f}%",
-                )
-
-            for reason in sel_row["reasons"]:
-                st.markdown(f"- {reason}")
-
-            # --- AI analysis for the selected stock, inline ---------------------
-            st.markdown("#### 🤖 AI Analysis")
-            _displayed_commentary = st.session_state.get(f"regen_{scan_date}", ai_commentary)
-            _ai_section = (
-                _split_ai_commentary(_displayed_commentary, [sel_row["ticker"]]).get(sel_row["ticker"], "")
-                if _displayed_commentary else ""
-            )
-            if _ai_section:
-                _btn_col, _regen_col, _ = st.columns([1, 1, 6])
-                with _btn_col:
-                    _escaped_comm = html.escape(_ai_section)
-                    st.markdown(
-                        f'<textarea id="_ai_comm_text" style="position:fixed;left:-9999px">{_escaped_comm}</textarea>'
-                        '<button onclick="navigator.clipboard.writeText(document.getElementById(\'_ai_comm_text\').value)'
-                        '.then(()=>{{this.innerHTML=\'✅ Copied!\';setTimeout(()=>this.innerHTML=\'📋 Copy\',1500)}})"'
-                        ' style="padding:4px 12px;border-radius:4px;border:1px solid #ccc;cursor:pointer;background:transparent">📋 Copy</button>',
-                        unsafe_allow_html=True,
-                    )
-                with _regen_col:
-                    if st.button("🔄 Regenerate", key="regen_ai_btn"):
-                        with st.spinner("Regenerating AI commentary..."):
-                            try:
-                                _new_comm = get_ai_recommendations(signals_df)
-                                st.session_state[f"regen_{scan_date}"] = _new_comm
-                                st.rerun()
-                            except Exception as _e:
-                                st.error(f"Regeneration failed: {_e}")
-                st.markdown(_ai_section)
+        # Fragment boundary: everything below (table, filters, pin/compare/
+        # card-view, per-stock detail panel) reruns on its own when a widget
+        # INSIDE it changes (row select, checkbox, search, pin button) -
+        # NOT the score breakdown chart, sector intelligence, or heatmap
+        # above, which only re-render on a real full-page rerun. This is
+        # what actually fixes the full-page redraw on every click (the
+        # sticky-bar removal earlier only removed one symptom of it).
+        @st.fragment
+        def _render_shortlist_interactive():
+            # --- Day-over-day diff vs the previous retained scan ----------------
+            # SCAN_HISTORY_RETENTION_DAYS bounds how far back `available_dates`
+            # goes, so "previous" here means the next-older retained scan, not
+            # necessarily yesterday.
+            prev_scan_date = None
+            prev_signals_df = None
+            if scan_date in available_dates:
+                _scan_idx = available_dates.index(scan_date)
+                if _scan_idx + 1 < len(available_dates):
+                    prev_scan_date = available_dates[_scan_idx + 1]
+                    _prev_result = db_handler.get_scan_by_date(prev_scan_date)
+                    if _prev_result is not None:
+                        _, _, prev_signals_df = _prev_result
+    
+            if prev_signals_df is not None and not prev_signals_df.empty:
+                prev_scores = dict(zip(prev_signals_df["ticker"], prev_signals_df["score"]))
             else:
-                st.caption(
-                    "No AI write-up for this stock yet - only the top-ranked picks "
-                    "get a full Entry/Stop-Loss/Take-Profit analysis at scan time."
+                prev_scores = None
+    
+            def _score_delta_display(row):
+                if prev_scores is None:
+                    return "—"
+                if row["ticker"] not in prev_scores:
+                    return "🆕 New"
+                delta = int(row["score"]) - int(prev_scores[row["ticker"]])
+                if delta > 0:
+                    return f"▲ +{delta}"
+                if delta < 0:
+                    return f"▼ {delta}"
+                return "→ 0"
+    
+            # Shimmer placeholder while get_score_history resolves - a no-op
+            # visually on the (usual) cache hit, but covers the moment on a
+            # genuine cache miss (cold start, or the 5-minute TTL just
+            # expired) that used to just be a blank gap before the table
+            # appeared. Same shimmer-line CSS already used for AI commentary
+            # loading elsewhere in this file.
+            _table_placeholder = st.empty()
+            _table_placeholder.markdown(
+                """
+                <div style="padding:4px 0">
+                    <div class="shimmer-line" style="height:32px;width:100%;"></div>
+                    <div class="shimmer-line" style="height:32px;width:100%;"></div>
+                    <div class="shimmer-line" style="height:32px;width:100%;"></div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            score_history = db_handler.get_score_history(
+                tuple(signals_df["ticker"].tolist()), scan_date
+            )
+            _table_placeholder.empty()
+
+            display_df = signals_df.copy()
+            display_df["score_delta_display"] = display_df.apply(_score_delta_display, axis=1)
+            def _fmt_score_trend(scores):
+                if not scores:
+                    return "—"
+                recent = scores[-4:]
+                parts = " → ".join(str(int(s)) for s in recent)
+                if len(recent) >= 2:
+                    if recent[-1] > recent[0]:
+                        return parts + " ▲"
+                    if recent[-1] < recent[0]:
+                        return parts + " ▼"
+                    return parts + " →"
+                return parts
+    
+            display_df["score_trend"] = display_df["ticker"].map(
+                lambda t: _fmt_score_trend(score_history.get(t, []))
+            )
+            display_df["macd_hist_display"] = display_df.apply(
+                # ▲/▼ prefix redundant with the green/red styling below (see
+                # _style_macd_diff) - readable without relying on color alone.
+                lambda r: f"{'▲' if r['macd_hist'] > 0 else '▼' if r['macd_hist'] < 0 else '–'} "
+                          f"{r['macd_hist']:.2f} ({r['macd_hist_direction']})",
+                axis=1,
+            )
+            display_df["buy_sell_display"] = display_df.apply(
+                lambda r: f"{r['buy_pct']:.0f}% / {r['sell_pct']:.0f}%", axis=1
+            )
+            display_df["sector_trend_display"] = (display_df["sector_trend_pct"] * 100).round(2)
+            display_df["signals_display"] = display_df["score_breakdown"].apply(_signal_tags)
+    
+            display_df = display_df[[
+                "ticker", "sector", "close", "rsi", "macd_hist_display", "nearest_fib_level",
+                "nearest_fib_price", "fib_distance_pct", "week52_high",
+                "pct_from_52w_high", "volume_ratio", "buy_sell_display",
+                "sector_trend_display", "score_delta_display", "score_trend",
+                "signals_display",
+            ]].rename(columns={
+                "ticker": "Ticker",
+                "sector": "Sector",
+                "close": "Price",
+                "rsi": "RSI",
+                "macd_hist_display": "MACD-Signal Diff (dir)",
+                "nearest_fib_level": "Nearest Fib",
+                "nearest_fib_price": "Fib Price",
+                "fib_distance_pct": "Fib Dist %",
+                "week52_high": "52W High",
+                "pct_from_52w_high": "% From 52W High",
+                "volume_ratio": "Vol vs 20D Avg",
+                "buy_sell_display": "Buy % / Sell %",
+                "sector_trend_display": "Sector Trend % (10D)",
+                "score_delta_display": "Δ vs Prev",
+                "score_trend": "Score Trend",
+                "signals_display": "Signals",
+            })
+            display_df["Fib Dist %"] = (display_df["Fib Dist %"] * 100).round(2)
+            display_df["% From 52W High"] = (display_df["% From 52W High"] * 100).round(2)
+            display_df["Vol vs 20D Avg"] = display_df["Vol vs 20D Avg"].round(2)
+            display_df[["Price", "RSI", "Fib Price", "52W High"]] = (
+                display_df[["Price", "RSI", "Fib Price", "52W High"]].round(2)
+            )
+    
+            # Pinned tickers float to the top regardless of score - "stable"
+            # sort so score order (already applied above) is preserved within
+            # the pinned/unpinned groups, not shuffled. No visible "Pinned"
+            # column - pin status is only shown via the ⭐/☆ button in the
+            # per-stock detail panel, so the table itself stays uncluttered.
+            watchlist = db_handler.get_watchlist(user_email)
+            display_df["_pinned"] = display_df["Ticker"].isin(watchlist)
+            display_df = display_df.sort_values(
+                by="_pinned", ascending=False, kind="stable"
+            ).drop(columns="_pinned").reset_index(drop=True)
+    
+            # Compact view by default (better on mobile / narrow screens) - the
+            # remaining columns are still available via the checkbox below, and
+            # always shown in the per-row detail panel when a row is clicked.
+            compact_columns = [
+                "Ticker", "Sector", "Price", "RSI", "MACD-Signal Diff (dir)",
+                "Nearest Fib", "Fib Dist %", "Δ vs Prev", "Score Trend",
+            ]
+            _filter_col1, _filter_col2 = st.columns([2, 1])
+            with _filter_col1:
+                _search = st.text_input(
+                    "🔍 Filter by ticker", key="shortlist_search", placeholder="e.g. RELIANCE",
+                    label_visibility="collapsed",
+                ).strip().upper()
+            with _filter_col2:
+                _sector_filter = st.selectbox(
+                    "Sector",
+                    ["All Sectors"] + sorted(display_df["Sector"].unique().tolist()),
+                    key="shortlist_sector_filter",
+                    label_visibility="collapsed",
                 )
-
-            with st.expander("📊 Company Basics (promoter holding, revenue, profit)", expanded=False):
-                _basics = fundamentals.get_company_basics(sel_row["ticker"])
-                if _basics:
-                    _render_company_basics(_basics)
+            if _search:
+                display_df = display_df[display_df["Ticker"].str.contains(_search, na=False)]
+            if _sector_filter != "All Sectors":
+                display_df = display_df[display_df["Sector"] == _sector_filter]
+    
+            _col_toggle, _card_toggle = st.columns([2, 1])
+            with _col_toggle:
+                show_all_cols = st.checkbox(
+                    "Show all columns (52W high, volume, buy/sell pressure, sector trend)",
+                    value=False,
+                )
+            with _card_toggle:
+                # Streamlit can't detect the viewport server-side, so this is an
+                # explicit opt-in rather than an automatic mobile switch - the
+                # wide table still works on phones via horizontal scroll (see
+                # the mobile CSS above), this is just an easier-to-thumb-through
+                # alternative, one stock per card instead of one wide grid.
+                card_view = st.checkbox("📱 Card view", value=False)
+            table_df = display_df if show_all_cols else display_df[compact_columns]
+    
+            if card_view:
+                for _, crow in table_df.iterrows():
+                    with st.container(border=True):
+                        _c1, _c2 = st.columns([4, 1])
+                        with _c1:
+                            _card_pin = "⭐ " if crow["Ticker"] in watchlist else ""
+                            st.markdown(
+                                f"{_card_pin}**{crow['Ticker']}** ({crow['Sector']}) "
+                                f"— ₹{crow['Price']:.2f}"
+                            )
+                            st.caption(
+                                f"RSI {crow['RSI']:.1f} · MACD {crow['MACD-Signal Diff (dir)']} · "
+                                f"Fib {crow['Nearest Fib']} ({crow['Fib Dist %']:+.2f}%)"
+                            )
+                            st.caption(crow.get("Signals", ""))
+                        with _c2:
+                            if st.button("Details", key=f"card_details_{crow['Ticker']}", use_container_width=True):
+                                st.session_state["_card_selected_ticker"] = crow["Ticker"]
+                select_event = None
+            else:
+                # With all columns shown, let the table keep its natural (wider)
+                # width and scroll horizontally instead of squeezing every column
+                # into the container.
+                table_width = "content" if show_all_cols else "stretch"
+                styled_table = (
+                    table_df.style.set_properties(**{
+                        "background-color": COLOR_TABLE_BG,
+                        "color": COLOR_TABLE_TEXT,
+                        "border": f"1px solid {COLOR_TABLE_GRID}",
+                    })
+                    .map(_style_rsi, subset=["RSI"])
+                    .map(_style_macd_diff, subset=["MACD-Signal Diff (dir)"])
+                )
+                select_event = st.dataframe(
+                    styled_table, width=table_width, hide_index=True,
+                    on_select="rerun", selection_mode="single-row-required", key="shortlist_table",
+                )
+            with st.expander("ℹ️ Reading the table", expanded=False):
+                st.markdown(
+                    f"**RSI** — 🟩 green when oversold (≤ {config.RSI_OVERSOLD}, possible bullish reversal), "
+                    f"🟥 red when overbought (≥ {config.RSI_OVERBOUGHT}, possible bearish reversal).\n\n"
+                    f"**Δ vs Prev** — score change vs the previous retained scan"
+                    f"{f' ({prev_scan_date})' if prev_scan_date else ''}; 🆕 = new to the shortlist. "
+                    f"**Score Trend** — scores across the last {config.SCAN_HISTORY_RETENTION_DAYS} retained scans (oldest → newest), with ▲/▼/→ showing the overall direction.\n\n"
+                    "**MACD-Signal Diff (dir)** — positive = MACD above Signal line (bullish), negative = below (bearish). "
+                    "**(up)**/**(down)** shows whether the histogram rose or fell vs the prior session.\n\n"
+                    "**Fib Dist %** — how close price is to its nearest Fibonacci retracement level.\n\n"
+                    "**Signals** — which score components contributed points for this stock "
+                    "(🔷 Fib, 🟠 RSI, 🟢 MACD, 🟣 Swing, 🔴 Sector — same colors as the Score "
+                    "Breakdown chart above). Click a row for the full breakdown including "
+                    "52W high, volume, buy/sell pressure, and sector trend."
+                )
+                if show_all_cols:
+                    st.markdown(
+                        f"**% From 52W High** — how far current price sits below the 52-week high (0% = at the high). "
+                        f"**Vol vs 20D Avg** — latest volume as a multiple of the {config.VOLUME_AVG_WINDOW}-day average "
+                        f"(≥ {config.VOLUME_SURGE_RATIO}x = surge). "
+                        f"**Buy % / Sell %** — volume-weighted proxy over the last {config.BUY_SELL_PRESSURE_WINDOW} sessions "
+                        "(not live order-book data). "
+                        "**Sector Trend % (10D)** — sector's average return over the last 10 sessions."
+                    )
+    
+            with st.expander("🔬 Compare Stocks (side by side)", expanded=False):
+                _compare_tickers = st.multiselect(
+                    "Pick 2-4 stocks to compare",
+                    options=table_df["Ticker"].tolist(),
+                    max_selections=4,
+                    key="compare_tickers",
+                )
+                if len(_compare_tickers) < 2:
+                    st.caption("Pick at least 2 stocks to see them compared side by side.")
                 else:
-                    st.caption("Could not load fundamental data for this stock.")
+                    _compare_metrics = {}
+                    for ticker in _compare_tickers:
+                        r = signals_df[signals_df["ticker"] == ticker].iloc[0]
+                        breakdown = r["score_breakdown"] or {}
+                        _compare_metrics[ticker] = {
+                            "Score": f"{r['score']:.1f}/100",
+                            "Price": f"₹{r['close']:.2f}",
+                            "RSI": f"{r['rsi']:.1f}",
+                            "MACD-Signal Diff": f"{r['macd_hist']:.2f} ({r['macd_hist_direction']})",
+                            "Nearest Fib": f"{r['nearest_fib_level']} ({r['fib_distance_pct'] * 100:.2f}% away)",
+                            "Swing Potential": f"{breakdown.get('swing', 0):.1f} / {config.SCORE_SWING_POTENTIAL} pts",
+                            "52W High": f"₹{r['week52_high']:.2f} ({r['pct_from_52w_high'] * 100:.1f}% below)",
+                            "Volume vs 20D Avg": f"{r['volume_ratio']:.2f}x",
+                            "Sector": r["sector"],
+                            "Sector Trend (10D)": f"{r['sector_trend_pct'] * 100:+.2f}%",
+                            "Signals": _signal_tags(breakdown),
+                        }
+                    # dict-of-dicts -> outer keys (tickers) become columns, inner
+                    # keys (metric names) become the row index - exactly the
+                    # transposed "one column per stock" layout compare mode wants.
+                    _compare_df = pd.DataFrame(_compare_metrics)[_compare_tickers]
+                    styled_compare = _compare_df.style.set_properties(**{
+                        "background-color": COLOR_TABLE_BG,
+                        "color": COLOR_TABLE_TEXT,
+                        "border": f"1px solid {COLOR_TABLE_GRID}",
+                    })
+                    st.dataframe(styled_compare, use_container_width=True)
+    
+            if prev_scores is not None:
+                dropped_tickers = set(prev_scores) - set(signals_df["ticker"])
+                if dropped_tickers:
+                    dropped_list = ", ".join(
+                        f"{t} ({prev_scores[t]}/100)" for t in sorted(dropped_tickers)
+                    )
+                    st.caption(f"📉 Dropped from the shortlist since {prev_scan_date}: {dropped_list}")
+    
+            selected_rows = select_event["selection"]["rows"] if select_event else []
+            sel_ticker = None
+            if selected_rows:
+                # Resolve by ticker, not raw position - table_df (what's actually
+                # displayed/selected) can be filtered (search/sector) and/or
+                # reordered (pinned rows first) relative to signals_df, so a
+                # positional index into signals_df could silently point at the
+                # wrong stock.
+                sel_ticker = table_df.iloc[selected_rows[0]]["Ticker"]
+            elif card_view and st.session_state.get("_card_selected_ticker") in table_df["Ticker"].values:
+                sel_ticker = st.session_state["_card_selected_ticker"]
+    
+            if sel_ticker:
+                sel_row = signals_df[signals_df["ticker"] == sel_ticker].iloc[0]
+    
+                _title_col, _pin_col = st.columns([5, 1])
+                with _title_col:
+                    st.markdown(f"**{sel_row['ticker']}** ({sel_row['sector']}) — score {sel_row['score']}/100")
+                with _pin_col:
+                    _is_pinned = sel_ticker in watchlist
+                    if st.button(
+                        "⭐ Unpin" if _is_pinned else "☆ Pin",
+                        key=f"pin_toggle_{sel_ticker}",
+                        use_container_width=True,
+                    ):
+                        if _is_pinned:
+                            db_handler.remove_from_watchlist(user_email, sel_ticker)
+                            st.toast(f"Unpinned {sel_ticker}")
+                        else:
+                            db_handler.add_to_watchlist(user_email, sel_ticker)
+                            st.toast(f"⭐ Pinned {sel_ticker}", icon="⭐")
+                        # Plain rerun (not scope="fragment") - Streamlit only
+                        # allows the fragment scope on a rerun triggered by
+                        # the fragment's OWN interaction dispatch, which a
+                        # manual st.rerun() call inside a button handler
+                        # doesn't reliably count as; a full rerun here is a
+                        # fine tradeoff since pinning is an occasional
+                        # action, not the frequent row-select/filter clicks
+                        # the fragment boundary is actually protecting.
+                        st.rerun()
+    
+                d1, d2, d3, d4, d5 = st.columns(5)
+                with d1:
+                    st.metric(
+                        "Nearest Fib",
+                        f"{sel_row['nearest_fib_level']} @ {sel_row['nearest_fib_price']:.2f}",
+                    )
+                with d2:
+                    st.metric(
+                        "52W High", f"₹{sel_row['week52_high']:.2f}",
+                        delta=f"-{sel_row['pct_from_52w_high'] * 100:.1f}%",
+                    )
+                with d3:
+                    st.metric("Vol vs 20D Avg", f"{sel_row['volume_ratio']:.2f}x")
+                with d4:
+                    st.metric("Buy % / Sell %", f"{sel_row['buy_pct']:.0f}% / {sel_row['sell_pct']:.0f}%")
+                with d5:
+                    st.metric(
+                        f"Sector Trend ({config.SECTOR_TREND_LOOKBACK_DAYS}D)",
+                        f"{sel_row['sector_trend_pct'] * 100:+.2f}%",
+                    )
+    
+                for reason in sel_row["reasons"]:
+                    st.markdown(f"- {reason}")
+    
+                # --- AI analysis for the selected stock, inline ---------------------
+                st.markdown("#### 🤖 AI Analysis")
+                _displayed_commentary = st.session_state.get(f"regen_{scan_date}", ai_commentary)
+                _ai_section = (
+                    _split_ai_commentary(_displayed_commentary, [sel_row["ticker"]]).get(sel_row["ticker"], "")
+                    if _displayed_commentary else ""
+                )
+                if _ai_section:
+                    _btn_col, _regen_col, _ = st.columns([1, 1, 6])
+                    with _btn_col:
+                        _escaped_comm = html.escape(_ai_section)
+                        st.markdown(
+                            f'<textarea id="_ai_comm_text" style="position:fixed;left:-9999px">{_escaped_comm}</textarea>'
+                            '<button onclick="navigator.clipboard.writeText(document.getElementById(\'_ai_comm_text\').value)'
+                            '.then(()=>{{this.innerHTML=\'✅ Copied!\';setTimeout(()=>this.innerHTML=\'📋 Copy\',1500)}})"'
+                            ' style="padding:4px 12px;border-radius:4px;border:1px solid #ccc;cursor:pointer;background:transparent">📋 Copy</button>',
+                            unsafe_allow_html=True,
+                        )
+                    with _regen_col:
+                        if st.button("🔄 Regenerate", key="regen_ai_btn"):
+                            with st.spinner("Regenerating AI commentary..."):
+                                try:
+                                    _new_comm = get_ai_recommendations(signals_df)
+                                    st.session_state[f"regen_{scan_date}"] = _new_comm
+                                    st.rerun()
+                                except Exception as _e:
+                                    st.error(f"Regeneration failed: {_e}")
+                    st.markdown(_ai_section)
+                else:
+                    st.caption(
+                        "No AI write-up for this stock yet - only the top-ranked picks "
+                        "get a full Entry/Stop-Loss/Take-Profit analysis at scan time."
+                    )
+    
+                with st.expander("📊 Company Basics (promoter holding, revenue, profit)", expanded=False):
+                    _basics = fundamentals.get_company_basics(sel_row["ticker"])
+                    if _basics:
+                        _render_company_basics(_basics)
+                    else:
+                        st.caption("Could not load fundamental data for this stock.")
 
-            # --- Chart analysis for the selected stock, inline ------------------
-            st.markdown("#### 📐 Fibonacci Retracement Chart")
-            _render_chart_analysis(sel_row)
+                # --- Chart analysis for the selected stock, inline ------------------
+                st.markdown("#### 📐 Fibonacci Retracement Chart")
+                _render_chart_analysis(sel_row)
+
+        _render_shortlist_interactive()
 
 # ---------------------------------------------------------------------------
 # Tab 4: Custom Analysis - on-demand AI Entry/Stop-Loss/Take-Profit write-up
